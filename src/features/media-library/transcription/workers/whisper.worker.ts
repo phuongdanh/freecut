@@ -5,6 +5,7 @@ import type {
   WhisperWorkerMessage,
 } from '../types';
 import { createLogger } from '@/shared/logging/logger';
+import { LANGUAGES } from '@/constants/language-constants';
 
 const logger = createLogger('TranscriptionWorker');
 
@@ -47,10 +48,77 @@ let asrPipeline: ASRPipeline | null = null;
 let currentModelId: string | null = null;
 let port: MessagePort | null = null;
 let language: string | undefined;
+let targetLanguage: string | undefined;
 let pipelineReady = false;
 const queue: PCMChunk[] = [];
 let processing = false;
 let reportedEstimatedBytes = 0;
+
+function getLanguageName(code: string): string {
+  const match = LANGUAGES.find((lang: { code: string; name: string }) => lang.code === code);
+  return match?.name ?? code;
+}
+
+async function translateSegments({
+  segments,
+  targetLang,
+}: {
+  segments: { text: string; start: number; end: number }[];
+  targetLang: string;
+}): Promise<{ text: string; start: number; end: number }[]> {
+  try {
+    const targetLanguageName = getLanguageName(targetLang);
+
+    const chunks = segments.map((segment, index) => ({
+      text: segment.text,
+      timestamp: [segment.start, segment.end] as [number, number],
+      id: `sentence-${index}`,
+      selected: false,
+    }));
+
+    const requestBody = {
+      target_language_code: targetLang,
+      target_language_name: targetLanguageName,
+      text: JSON.stringify({ chunks }),
+    };
+
+    const apiUrl = new URL(
+      '/api/external/translate',
+      self.location?.origin ?? 'http://localhost:3000'
+    ).toString();
+
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Translation API error: ${response.status} ${response.statusText}`);
+    }
+
+    const json = await response.json();
+    if (json?.data?.text) {
+      const parsed = JSON.parse(json.data.text);
+      if (parsed?.chunks && Array.isArray(parsed.chunks)) {
+        return parsed.chunks.map(
+          (chunk: { text: string; timestamp: [number, number] }) => ({
+            text: chunk.text,
+            start: chunk.timestamp[0] ?? 0,
+            end: chunk.timestamp[1] ?? chunk.timestamp[0] ?? 0,
+          })
+        );
+      }
+    }
+
+    return segments;
+  } catch (error) {
+    logger.error('Translation failed:', error);
+    return segments;
+  }
+}
 
 self.onmessage = async (event: MessageEvent) => {
   const message = event.data as WhisperWorkerMessage;
@@ -65,6 +133,7 @@ self.onmessage = async (event: MessageEvent) => {
 
   if (message.type === 'init') {
     language = message.language;
+    targetLanguage = message.targetLanguage;
     await initPipeline(message.modelId, message.quantization ?? 'hybrid');
   }
 };
@@ -246,14 +315,31 @@ async function transcribeChunk(chunk: PCMChunk): Promise<void> {
     chunks?: Array<{ text: string; timestamp: [number | null, number | null] }>;
   };
 
-  for (const segment of output.chunks ?? []) {
+  let segments = (output.chunks ?? [])
+    .filter(segment => segment.timestamp && segment.timestamp.length >= 2)
+    .map(segment => ({
+      text: segment.text,
+      start: (segment.timestamp[0] ?? 0) + chunk.timestamp,
+      end: (segment.timestamp[1] ?? 0) + chunk.timestamp,
+    }));
+
+  if (
+    targetLanguage &&
+    targetLanguage !== 'auto' &&
+    targetLanguage !== language &&
+    segments.length > 0
+  ) {
+    postMain({ type: 'progress', event: { stage: 'transcribing', progress: 0.99 } });
+    segments = await translateSegments({
+      segments,
+      targetLang: targetLanguage,
+    });
+  }
+
+  for (const segment of segments) {
     postMain({
       type: 'segment',
-      segment: {
-        text: segment.text,
-        start: (segment.timestamp[0] ?? 0) + chunk.timestamp,
-        end: (segment.timestamp[1] ?? 0) + chunk.timestamp,
-      },
+      segment,
     });
   }
 

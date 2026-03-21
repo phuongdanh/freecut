@@ -75,6 +75,7 @@ export class Bridge {
     file: File,
     model: WhisperModel = 'whisper-tiny',
     language?: string,
+    targetLanguage?: string,
     quantization?: QuantizationType,
   ): Promise<void> {
     const { port1, port2 } = new MessageChannel();
@@ -94,7 +95,7 @@ export class Bridge {
     });
 
     whisperWorker.postMessage({ type: 'port', port: port2 }, [port2]);
-    whisperWorker.postMessage({ type: 'init', modelId, language, quantization });
+    whisperWorker.postMessage({ type: 'init', modelId, language, targetLanguage, quantization });
 
     if (hasWebCodecs) {
       this.session.getWorker('decoder').postMessage({ type: 'init', file });

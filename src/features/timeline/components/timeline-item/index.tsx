@@ -1,4 +1,4 @@
-﻿import { useRef, useEffect, useMemo, memo, useCallback, useState } from 'react';
+import { useRef, useEffect, useMemo, memo, useCallback, useState } from 'react';
 import type { TimelineItem as TimelineItemType } from '@/types/timeline';
 import { useTimelineZoomContext } from '../../contexts/timeline-zoom-context';
 import { useTimelineStore } from '../../stores/timeline-store';
@@ -135,6 +135,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
     )
   );
   const defaultWhisperModel = useSettingsStore((s) => s.defaultWhisperModel);
+  const defaultWhisperLanguage = useSettingsStore((s) => s.defaultWhisperLanguage);
   const segmentOverlays = useTimelineItemOverlayStore(
     useCallback((s) => s.overlaysByItemId[item.id] ?? EMPTY_SEGMENT_OVERLAYS, [item.id])
   );
@@ -1071,6 +1072,8 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
   const handleCaptionGeneration = useCallback((
     model: MediaTranscriptModel,
     options?: {
+      language?: string;
+      targetLanguage?: string;
       forceTranscription?: boolean;
       replaceExisting?: boolean;
     },
@@ -1094,7 +1097,13 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
       try {
         const existingTranscript = await mediaTranscriptionService.getTranscript(mediaId);
         const needsTranscription =
-          forceTranscription || !existingTranscript || existingTranscript.model !== model;
+          forceTranscription
+          || !existingTranscript
+          || existingTranscript.model !== model
+          || (options?.language ? existingTranscript.language !== options.language : false)
+          || !!options?.targetLanguage;
+
+        let transcript = existingTranscript;
 
         if (needsTranscription) {
           overlayStore.upsertOverlay(clipId, {
@@ -1106,8 +1115,10 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
           store.setTranscriptStatus(mediaId, 'transcribing');
           store.setTranscriptProgress(mediaId, { stage: 'loading', progress: 0 });
 
-          await mediaTranscriptionService.transcribeMedia(mediaId, {
+          transcript = await mediaTranscriptionService.transcribeClipSegment(item as any, {
             model,
+            language: options?.language,
+            targetLanguage: options?.targetLanguage,
             onProgress: (progress) => {
               const mediaLibraryStore = useMediaLibraryStore.getState();
               mediaLibraryStore.setTranscriptProgress(mediaId, progress);
@@ -1139,6 +1150,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
         const result = await mediaTranscriptionService.insertTranscriptAsCaptions(mediaId, {
           clipIds: [clipId],
           replaceExisting,
+          transcript,
         });
 
         const successMessage = replaceExisting
@@ -1174,12 +1186,19 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
     void run();
   }, [item.id, item.mediaId, item.type, isBroken]);
 
-  const handleGenerateCaptions = useCallback((model: MediaTranscriptModel) => {
-    handleCaptionGeneration(model);
+  const handleGenerateCaptions = useCallback((model: MediaTranscriptModel, options?: {
+    language?: string;
+    targetLanguage?: string;
+  }) => {
+    handleCaptionGeneration(model, options);
   }, [handleCaptionGeneration]);
 
-  const handleRegenerateCaptions = useCallback((model: MediaTranscriptModel) => {
+  const handleRegenerateCaptions = useCallback((model: MediaTranscriptModel, options?: {
+    language?: string;
+    targetLanguage?: string;
+  }) => {
     handleCaptionGeneration(model, {
+      ...options,
       forceTranscription: true,
       replaceExisting: true,
     });
@@ -1272,6 +1291,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
         canRegenerateCaptions={hasGeneratedCaptions}
         isGeneratingCaptions={isCaptionGenerationActive || transcriptStatus === 'transcribing'}
         defaultCaptionModel={defaultWhisperModel}
+        defaultCaptionLanguage={defaultWhisperLanguage}
         onGenerateCaptions={handleGenerateCaptions}
         onRegenerateCaptions={handleRegenerateCaptions}
         isCompositionItem={isCompositionItem}

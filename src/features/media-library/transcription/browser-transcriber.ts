@@ -118,6 +118,7 @@ export class TranscribeStream implements AsyncIterable<TranscriptSegment> {
         this.file,
         (this.options.model as WhisperModel | undefined) ?? 'whisper-tiny',
         this.options.language,
+        this.options.targetLanguage,
         this.options.quantization,
       );
     } catch (error) {

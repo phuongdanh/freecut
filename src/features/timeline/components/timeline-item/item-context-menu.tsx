@@ -1,4 +1,5 @@
-import { memo, ReactNode, useMemo } from 'react';
+import { memo, ReactNode, useState, useMemo } from 'react';
+import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -10,14 +11,54 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { useSelectionStore } from '@/shared/state/selection';
 import { PROPERTY_LABELS, type AnimatableProperty } from '@/types/keyframe';
 import type { PropertyKeyframes } from '@/types/keyframe';
 import type { MediaTranscriptModel } from '@/types/storage';
 import {
+  getWhisperLanguageSelectValue,
+  WHISPER_AUTO_LANGUAGE_VALUE,
   WHISPER_MODEL_LABELS,
   WHISPER_MODEL_OPTIONS,
 } from '@/shared/utils/whisper-settings';
+
+/** Languages shown in the segment caption dialog (Whisper codes). */
+const CAPTION_DIALOG_LANGUAGES: ReadonlyArray<{ value: string; label: string }> = [
+  { value: 'en', label: 'English' },
+  { value: 'zh', label: 'Chinese' },
+  { value: 'ja', label: 'Japanese' },
+  { value: 'ko', label: 'Korean' },
+  { value: 'vi', label: 'Vietnamese' },
+  { value: 'es', label: 'Spanish' },
+];
+
+const CAPTION_DIALOG_LANGUAGE_CODES = new Set(CAPTION_DIALOG_LANGUAGES.map((l) => l.value));
+
+function getInitialCaptionSourceLanguage(defaultCaptionLanguage: string | undefined): string {
+  const fromSettings = getWhisperLanguageSelectValue(defaultCaptionLanguage);
+  if (fromSettings === WHISPER_AUTO_LANGUAGE_VALUE) return WHISPER_AUTO_LANGUAGE_VALUE;
+  return CAPTION_DIALOG_LANGUAGE_CODES.has(fromSettings) ? fromSettings : WHISPER_AUTO_LANGUAGE_VALUE;
+}
+
+interface CaptionGenerationOptions {
+  language?: string;
+  targetLanguage?: string;
+}
 
 interface ItemContextMenuProps {
   children: ReactNode;
@@ -47,8 +88,9 @@ interface ItemContextMenuProps {
   canRegenerateCaptions?: boolean;
   isGeneratingCaptions?: boolean;
   defaultCaptionModel?: MediaTranscriptModel;
-  onGenerateCaptions?: (model: MediaTranscriptModel) => void;
-  onRegenerateCaptions?: (model: MediaTranscriptModel) => void;
+  defaultCaptionLanguage?: string;
+  onGenerateCaptions?: (model: MediaTranscriptModel, options?: CaptionGenerationOptions) => void;
+  onRegenerateCaptions?: (model: MediaTranscriptModel, options?: CaptionGenerationOptions) => void;
   /** Whether this item is a composition item (enables enter/dissolve options) */
   isCompositionItem?: boolean;
   onEnterComposition?: () => void;
@@ -86,6 +128,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   canRegenerateCaptions,
   isGeneratingCaptions,
   defaultCaptionModel,
+  defaultCaptionLanguage,
   onGenerateCaptions,
   onRegenerateCaptions,
   isCompositionItem,
@@ -94,6 +137,11 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   canCreatePreComp,
   onCreatePreComp,
 }: ItemContextMenuProps) {
+  const [captionDialogOpen, setCaptionDialogOpen] = useState(false);
+  const [captionAction, setCaptionAction] = useState<'generate' | 'regenerate'>('generate');
+  const [captionModel, setCaptionModel] = useState<MediaTranscriptModel | null>(null);
+  const [sourceLanguage, setSourceLanguage] = useState(WHISPER_AUTO_LANGUAGE_VALUE);
+  const [targetLanguage, setTargetLanguage] = useState(WHISPER_AUTO_LANGUAGE_VALUE);
   const selectedCount = useSelectionStore((s) => s.selectedItemIds.length);
   // Filter to only properties that actually have keyframes
   const propertiesWithKeyframes = useMemo(() => {
@@ -106,6 +154,38 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   );
 
   const hasKeyframes = propertiesWithKeyframes.length > 0;
+
+  const openCaptionDialog = (action: 'generate' | 'regenerate', model: MediaTranscriptModel) => {
+    setCaptionAction(action);
+    setCaptionModel(model);
+    setSourceLanguage(getInitialCaptionSourceLanguage(defaultCaptionLanguage));
+    setTargetLanguage(WHISPER_AUTO_LANGUAGE_VALUE);
+    setCaptionDialogOpen(true);
+  };
+
+  const submitCaptionRequest = () => {
+    if (!captionModel) return;
+    const language = sourceLanguage === WHISPER_AUTO_LANGUAGE_VALUE ? undefined : sourceLanguage;
+    const translatedTargetLanguage = (
+      targetLanguage !== WHISPER_AUTO_LANGUAGE_VALUE
+      && targetLanguage !== sourceLanguage
+    )
+      ? targetLanguage
+      : undefined;
+
+    const options: CaptionGenerationOptions = {
+      language,
+      targetLanguage: translatedTargetLanguage,
+    };
+
+    if (captionAction === 'generate') {
+      onGenerateCaptions?.(captionModel, options);
+    } else {
+      onRegenerateCaptions?.(captionModel, options);
+    }
+
+    setCaptionDialogOpen(false);
+  };
 
   return (
     <ContextMenu>
@@ -206,7 +286,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
                   <ContextMenuSubContent className="w-48">
                     {defaultCaptionModel && (
                       <>
-                        <ContextMenuItem onClick={() => onGenerateCaptions(defaultCaptionModel)}>
+                        <ContextMenuItem onClick={() => openCaptionDialog('generate', defaultCaptionModel)}>
                           {`Default (${WHISPER_MODEL_LABELS[defaultCaptionModel]})`}
                         </ContextMenuItem>
                         <ContextMenuSeparator />
@@ -215,7 +295,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
                     {explicitCaptionModelOptions.map((option) => (
                       <ContextMenuItem
                         key={option.value}
-                        onClick={() => onGenerateCaptions(option.value)}
+                        onClick={() => openCaptionDialog('generate', option.value)}
                       >
                         {option.label}
                       </ContextMenuItem>
@@ -229,7 +309,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
                     <ContextMenuSubContent className="w-48">
                       {defaultCaptionModel && (
                         <>
-                          <ContextMenuItem onClick={() => onRegenerateCaptions(defaultCaptionModel)}>
+                          <ContextMenuItem onClick={() => openCaptionDialog('regenerate', defaultCaptionModel)}>
                             {`Default (${WHISPER_MODEL_LABELS[defaultCaptionModel]})`}
                           </ContextMenuItem>
                           <ContextMenuSeparator />
@@ -238,7 +318,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
                       {explicitCaptionModelOptions.map((option) => (
                         <ContextMenuItem
                           key={option.value}
-                          onClick={() => onRegenerateCaptions(option.value)}
+                          onClick={() => openCaptionDialog('regenerate', option.value)}
                         >
                           {option.label}
                         </ContextMenuItem>
@@ -289,6 +369,63 @@ export const ItemContextMenu = memo(function ItemContextMenu({
           <ContextMenuShortcut>Del</ContextMenuShortcut>
         </ContextMenuItem>
       </ContextMenuContent>
+      <Dialog open={captionDialogOpen} onOpenChange={setCaptionDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {captionAction === 'generate' ? 'Generate captions' : 'Regenerate captions'}
+            </DialogTitle>
+          </DialogHeader>
+
+          <div className="grid grid-cols-1 gap-4 py-2">
+            <div className="flex flex-col gap-2">
+              <Label>Original language</Label>
+              <Select value={sourceLanguage} onValueChange={setSourceLanguage}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select original language" />
+                </SelectTrigger>
+                <SelectContent position="item-aligned" className="max-h-72">
+                  <SelectItem value={WHISPER_AUTO_LANGUAGE_VALUE}>Auto-detect</SelectItem>
+                  {CAPTION_DIALOG_LANGUAGES.map((languageOption) => (
+                    <SelectItem key={languageOption.value} value={languageOption.value}>
+                      {languageOption.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-2">
+              <Label>Translate to</Label>
+              <Select value={targetLanguage} onValueChange={setTargetLanguage}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select target language" />
+                </SelectTrigger>
+                <SelectContent position="item-aligned" className="max-h-72">
+                  <SelectItem value={WHISPER_AUTO_LANGUAGE_VALUE}>Same as original</SelectItem>
+                  {CAPTION_DIALOG_LANGUAGES.map((languageOption) => (
+                    <SelectItem key={languageOption.value} value={languageOption.value}>
+                      {languageOption.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setCaptionDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button onClick={submitCaptionRequest}>
+              {captionAction === 'generate' ? 'Generate subtitles' : 'Regenerate subtitles'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </ContextMenu>
   );
 });

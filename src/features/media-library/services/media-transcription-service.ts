@@ -20,6 +20,7 @@ import {
   getCaptionTextItemTemplate,
   getCaptionRangeForClip,
 } from '../utils/caption-items';
+import { float32ToWav, processAudioForASR } from '@/features/media-library/deps/timeline-utils';
 import { useProjectStore } from '@/features/media-library/deps/projects';
 import { useTimelineStore } from '@/features/media-library/deps/timeline-stores';
 import { useSettingsStore } from '@/features/media-library/deps/settings-contract';
@@ -83,7 +84,7 @@ class MediaTranscriptionService {
     const model = options.model ?? settings.defaultWhisperModel ?? DEFAULT_MODEL;
     const quantization =
       options.quantization ?? settings.defaultWhisperQuantization ?? DEFAULT_QUANTIZATION;
-    const language = normalizeWhisperLanguage(options.language ?? settings.defaultWhisperLanguage);
+    const language = normalizeWhisperLanguage(options.language ?? settings.defaultWhisperLanguage) ?? 'en';
     const stream = this.transcriber.transcribe(file, {
       model,
       language,
@@ -117,11 +118,73 @@ class MediaTranscriptionService {
     return transcript;
   }
 
+  async transcribeClipSegment(
+    clip: CaptionableClip,
+    options: Pick<TranscribeOptions, 'language' | 'targetLanguage' | 'model' | 'quantization' | 'onProgress'> = {},
+  ): Promise<MediaTranscript> {
+    const mediaId = clip.mediaId;
+    if (!mediaId) throw new Error(`Media ID is missing for clip: ${clip.id}`);
+    const media = await mediaLibraryService.getMedia(mediaId);
+    if (!media) throw new Error(`Media not found: ${mediaId}`);
+
+    const blob = await mediaLibraryService.getMediaFile(mediaId);
+    if (!blob) throw new Error(`Could not load media file: ${media.fileName}`);
+
+    const arrayBuffer = await blob.arrayBuffer();
+    const float32Audio = await processAudioForASR({ buffer: arrayBuffer });
+
+    const timeline = useTimelineStore.getState();
+    const fps = timeline.fps;
+    const sourceStartSeconds = (clip.sourceStart ?? 0) / fps;
+    const durationSeconds = clip.durationInFrames / fps;
+
+    const sampleRate = 16_000;
+    const startSample = Math.floor(sourceStartSeconds * sampleRate);
+    const endSample = Math.floor((sourceStartSeconds + durationSeconds) * sampleRate);
+    const slicedAudio = float32Audio.subarray(startSample, endSample);
+    
+    const wavBlob = float32ToWav(slicedAudio, sampleRate);
+    const wavFile = new File([wavBlob], 'segment.wav', { type: 'audio/wav' });
+
+    const settings = useSettingsStore.getState();
+    const model = (options.model ?? settings.defaultWhisperModel ?? DEFAULT_MODEL) as MediaTranscriptModel;
+    const quantization = options.quantization ?? settings.defaultWhisperQuantization ?? DEFAULT_QUANTIZATION;
+    const language = normalizeWhisperLanguage(options.language ?? settings.defaultWhisperLanguage) ?? 'en';
+
+    const stream = this.transcriber.transcribe(wavFile, {
+      model,
+      language,
+      targetLanguage: options.targetLanguage,
+      quantization,
+      onProgress: options.onProgress,
+    });
+    
+    const segments = await stream.collect();
+    const shiftedSegments = segments.map((s) => ({
+      text: s.text.trim(),
+      start: s.start + sourceStartSeconds,
+      end: s.end + sourceStartSeconds,
+    }));
+
+    return {
+      id: `segment-${clip.id}`,
+      mediaId,
+      model,
+      language,
+      quantization,
+      text: shiftedSegments.map(s => s.text).join(' ').trim(),
+      segments: shiftedSegments,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+  }
+
   async insertTranscriptAsCaptions(
     mediaId: string,
-    options: InsertTranscriptAsCaptionsOptions = {},
+    options: InsertTranscriptAsCaptionsOptions & { transcript?: MediaTranscript } = {},
   ): Promise<InsertTranscriptAsCaptionsResult> {
-    const transcript = await getTranscript(mediaId);
+    const transcript = options.transcript ?? await getTranscript(mediaId);
+
     if (!transcript) {
       throw new Error('No transcript found for this media item');
     }
@@ -171,7 +234,7 @@ class MediaTranscriptionService {
           );
 
       if (!targetTrack) {
-        targetTrack = buildCaptionTrack(newTracks);
+        targetTrack = buildCaptionTrack(newTracks, clip.trackId);
         newTracks.push(targetTrack);
         newTracks.sort((a, b) => a.order - b.order);
       }

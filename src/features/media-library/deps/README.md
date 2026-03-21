@@ -7,7 +7,8 @@ Media-library-local adapters for external feature dependencies.
   coupling centralized.
 - `timeline-stores.ts`: timeline stores/types used by media-library modules.
 - `timeline-actions.ts`: timeline actions used by media-library modules.
-- `timeline-utils.ts`: timeline utility helpers used by media-library modules.
+- `timeline-utils.ts`: timeline utility helpers used by media-library modules
+  (re-exports from `timeline-contract`, including ASR audio prep from the timeline contract).
 - `timeline-services.ts`: timeline services used by media-library modules.
 - `timeline.ts`: compatibility barrel that re-exports the timeline adapters
   above. Prefer importing the more specific module directly in new code.

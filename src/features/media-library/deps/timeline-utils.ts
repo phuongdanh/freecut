@@ -1,1 +1,5 @@
-export { autoMatchOrphanedClips } from './timeline-contract';
+export {
+  autoMatchOrphanedClips,
+  float32ToWav,
+  processAudioForASR,
+} from './timeline-contract';

@@ -22,6 +22,7 @@ export interface TranscribeRuntimeInfo {
 export interface TranscribeOptions {
   model?: WhisperModel;
   language?: string;
+  targetLanguage?: string;
   quantization?: QuantizationType;
   onSegment?: (segment: TranscriptSegment) => void;
   onProgress?: (event: TranscribeProgress) => void;
@@ -48,6 +49,7 @@ export type WhisperWorkerMessage =
       type: 'init';
       modelId: string;
       language?: string;
+      targetLanguage?: string;
       quantization?: QuantizationType;
     };
 

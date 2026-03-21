@@ -225,7 +225,7 @@ export function findCompatibleCaptionTrack(
 export function findCompatibleCaptionTrackForRanges(
   tracks: readonly TimelineTrack[],
   items: readonly TimelineItem[],
-  ranges: readonly Array<{ startFrame: number; endFrame: number }>,
+  ranges: ReadonlyArray<{ startFrame: number; endFrame: number }>,
 ): TimelineTrack | null {
   const sortedTracks = [...tracks].sort((a, b) => a.order - b.order);
 
@@ -253,8 +253,42 @@ export function findCompatibleCaptionTrackForRanges(
   return null;
 }
 
-export function buildCaptionTrack(tracks: readonly TimelineTrack[]): TimelineTrack {
-  const maxOrder = tracks.reduce((highest, track) => Math.max(highest, track.order), -1);
+/**
+ * Picks a track `order` so the captions track sorts above the source media track in the timeline
+ * and composites with a higher z-index than that track (lower `order` = on top in preview).
+ */
+export function computeCaptionTrackOrder(
+  tracks: readonly TimelineTrack[],
+  sourceTrackId: string,
+): number {
+  const sorted = [...tracks].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const idx = sorted.findIndex((t) => t.id === sourceTrackId);
+
+  if (idx < 0) {
+    const minOrder = sorted.length > 0
+      ? Math.min(...sorted.map((t) => t.order ?? 0))
+      : 0;
+    return minOrder - 1;
+  }
+
+  if (idx === 0) {
+    const topOrder = sorted[0]!.order ?? 0;
+    return topOrder - 1;
+  }
+
+  const prevOrder = sorted[idx - 1]!.order ?? 0;
+  const targetOrder = sorted[idx]!.order ?? 0;
+  if (prevOrder < targetOrder) {
+    return (prevOrder + targetOrder) / 2;
+  }
+  // Same or inverted orders: nudge above the media track
+  return targetOrder - 1;
+}
+
+export function buildCaptionTrack(
+  tracks: readonly TimelineTrack[],
+  sourceTrackId: string,
+): TimelineTrack {
   return {
     id: `track-captions-${Date.now()}`,
     name: 'Captions',
@@ -263,7 +297,7 @@ export function buildCaptionTrack(tracks: readonly TimelineTrack[]): TimelineTra
     visible: true,
     muted: false,
     solo: false,
-    order: maxOrder + 1,
+    order: computeCaptionTrackOrder(tracks, sourceTrackId),
     items: [],
   };
 }
