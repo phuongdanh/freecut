@@ -98,6 +98,7 @@ class MediaTranscriptionService {
       mediaId,
       model,
       language,
+      captionTextLanguage: language,
       quantization,
       text: segments.map((segment) => segment.text.trim()).filter(Boolean).join(' ').trim(),
       segments: segments.map((segment) => ({
@@ -166,11 +167,18 @@ class MediaTranscriptionService {
       end: s.end + sourceStartSeconds,
     }));
 
+    const translationTarget = normalizeWhisperLanguage(options.targetLanguage);
+    const captionTextLanguage =
+      translationTarget && translationTarget !== language
+        ? translationTarget
+        : language;
+
     return {
       id: `segment-${clip.id}`,
       mediaId,
       model,
       language,
+      captionTextLanguage,
       quantization,
       text: shiftedSegments.map(s => s.text).join(' ').trim(),
       segments: shiftedSegments,
@@ -247,6 +255,7 @@ class MediaTranscriptionService {
         timelineFps: timeline.fps,
         canvasWidth,
         canvasHeight,
+        captionTextLanguage: transcript.captionTextLanguage ?? transcript.language,
         styleTemplate: existingGeneratedCaptions[0]
           ? getCaptionTextItemTemplate(existingGeneratedCaptions[0])
           : undefined,

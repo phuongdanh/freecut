@@ -45,6 +45,8 @@ export interface GeneratedCaptionSource {
   type: 'transcript';
   clipId: string;
   mediaId: string;
+  /** Whisper-style language code of the displayed caption text (matches transcript captionTextLanguage). */
+  textLanguage?: string;
 }
 
 // Discriminated union types for different item types

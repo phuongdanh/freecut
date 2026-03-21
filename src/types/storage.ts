@@ -102,6 +102,8 @@ export interface MediaTranscript {
   mediaId: string;
   model: MediaTranscriptModel;
   language?: string;
+  /** Language of the caption text (Whisper source, or translation target when translated). */
+  captionTextLanguage?: string;
   quantization: MediaTranscriptQuantization;
   text: string;
   segments: MediaTranscriptSegment[];

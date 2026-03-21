@@ -68,6 +68,7 @@ export interface ProjectTimeline {
       type: 'transcript';
       clipId: string;
       mediaId: string;
+      textLanguage?: string;
     };
     fontSize?: number;
     fontFamily?: string;

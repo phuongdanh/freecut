@@ -18,6 +18,8 @@ interface BuildCaptionTextItemsOptions {
   timelineFps: number;
   canvasWidth: number;
   canvasHeight: number;
+  /** Stored on each caption clip for TTS / display language defaults. */
+  captionTextLanguage?: string;
   styleTemplate?: CaptionTextItemTemplate;
 }
 
@@ -302,11 +304,16 @@ export function buildCaptionTrack(
   };
 }
 
-function buildCaptionSource(mediaId: string, clipId: string): GeneratedCaptionSource {
+function buildCaptionSource(
+  mediaId: string,
+  clipId: string,
+  textLanguage?: string,
+): GeneratedCaptionSource {
   return {
     type: 'transcript',
     mediaId,
     clipId,
+    ...(textLanguage ? { textLanguage } : {}),
   };
 }
 
@@ -385,6 +392,7 @@ export function buildCaptionTextItems({
   timelineFps,
   canvasWidth,
   canvasHeight,
+  captionTextLanguage,
   styleTemplate,
 }: BuildCaptionTextItemsOptions): TextItem[] {
   const normalizedSegments = normalizeCaptionSegments(segments);
@@ -425,7 +433,7 @@ export function buildCaptionTextItems({
       from,
       durationInFrames,
       mediaId,
-      captionSource: buildCaptionSource(mediaId, clip.id),
+      captionSource: buildCaptionSource(mediaId, clip.id, captionTextLanguage),
       label: segment.text.slice(0, 48),
       text: segment.text,
       fontSize: Math.max(36, Math.round(canvasHeight * 0.045)),

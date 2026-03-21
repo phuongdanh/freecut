@@ -11,6 +11,7 @@ import { Eye, EyeOff, Lock, GripVertical, Volume2, VolumeX, Radio, ChevronRight,
 import type { TimelineTrack } from '@/types/timeline';
 import { useTrackDrag } from '../hooks/use-track-drag';
 import { TIMELINE_SIDEBAR_WIDTH } from '../constants';
+import { TextToSpeechTrackButton } from './text-to-speech-track-button';
 
 interface TrackHeaderProps {
   track: TimelineTrack;
@@ -213,6 +214,9 @@ export const TrackHeader = memo(function TrackHeader({
                 className={`w-3 h-3 ${track.locked ? 'opacity-50' : ''}`}
               />
             </Button>
+
+            {/* Text-to-speech — non-group tracks (button disabled when no text clips) */}
+            {!isGroup && <TextToSpeechTrackButton track={track} />}
 
             {/* Close Gaps Button - only for non-group tracks */}
             {!isGroup && (
