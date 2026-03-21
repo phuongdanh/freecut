@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useMemo, memo, useCallback } from 'react';
-import { Search, Filter, SortAsc, Video, FileAudio, Image as ImageIcon, Trash2, Grid3x3, List, AlertTriangle, Info, X, FolderOpen, Link2Off, ChevronRight, Film, ArrowLeft, Zap, Loader2, Copy, Check, Upload } from 'lucide-react';
+import { Search, Filter, SortAsc, Video, FileAudio, Image as ImageIcon, Trash2, Grid3x3, List, AlertTriangle, Info, X, FolderOpen, Link2Off, ChevronRight, Film, ArrowLeft, Zap, Loader2, Copy, Check, Upload, Link } from 'lucide-react';
 import { createLogger } from '@/shared/logging/logger';
 
 const logger = createLogger('MediaLibrary');
@@ -12,6 +12,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,6 +82,9 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
   const [infoPanelDismissed, setInfoPanelDismissed] = useState(false);
   const [mediaOpen, setMediaOpen] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
+  const [isUrlDialogOpen, setIsUrlDialogOpen] = useState(false);
+  const [videoUrlInput, setVideoUrlInput] = useState('');
+  const [isImportingUrl, setIsImportingUrl] = useState(false);
 
   // Timeline store selectors - don't subscribe to items to avoid re-renders
   // Read items from store directly when needed (in delete handler)
@@ -85,6 +95,7 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
   const setCurrentProject = useMediaLibraryStore((s) => s.setCurrentProject);
   const loadMediaItems = useMediaLibraryStore((s) => s.loadMediaItems);
   const importMedia = useMediaLibraryStore((s) => s.importMedia);
+  const importMediaFromUrl = useMediaLibraryStore((s) => s.importMediaFromUrl);
   const importHandles = useMediaLibraryStore((s) => s.importHandles);
   const deleteMediaBatch = useMediaLibraryStore((s) => s.deleteMediaBatch);
   const showNotification = useMediaLibraryStore((s) => s.showNotification);
@@ -226,6 +237,20 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
       await importMedia();
     } catch (error) {
       logger.error('Import failed:', error);
+    }
+  };
+
+  const handleImportFromUrl = async () => {
+    if (!videoUrlInput.trim()) return;
+    try {
+      setIsImportingUrl(true);
+      await importMediaFromUrl(videoUrlInput);
+      setIsUrlDialogOpen(false);
+      setVideoUrlInput('');
+    } catch (error) {
+      logger.error('Failed to import from URL:', error);
+    } finally {
+      setIsImportingUrl(false);
     }
   };
 
@@ -407,6 +432,21 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
           >
             <FolderOpen className="w-3.5 h-3.5" />
             <span>Import</span>
+          </button>
+          
+          {/* Import from URL action */}
+          <button
+            onClick={() => setIsUrlDialogOpen(true)}
+            disabled={!currentProjectId}
+            className="flex items-center gap-1.5 h-7 px-2.5 rounded-md
+              bg-secondary border border-border text-foreground
+              hover:bg-secondary/80
+              disabled:opacity-40 disabled:cursor-not-allowed
+              transition-colors duration-150"
+            title="Import from URL"
+          >
+            <Link className="w-3.5 h-3.5" />
+            <span>URL</span>
           </button>
 
           {/* Missing media indicator */}
@@ -826,6 +866,50 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Import from URL dialog */}
+      <Dialog open={isUrlDialogOpen} onOpenChange={setIsUrlDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Import video from URL</DialogTitle>
+          </DialogHeader>
+          <div className="py-2 gap-3 flex flex-col">
+            <p className="text-sm text-muted-foreground">
+              Paste a direct video link or a supported social media URL
+              (YouTube, TikTok, Facebook, Douyin).
+            </p>
+            <Input
+              autoFocus
+              placeholder="https://example.com/video.mp4"
+              value={videoUrlInput}
+              onChange={(e) => setVideoUrlInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void handleImportFromUrl();
+                }
+              }}
+            />
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setIsUrlDialogOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={(e) => {
+                e.preventDefault();
+                void handleImportFromUrl();
+              }}
+              disabled={isImportingUrl || !videoUrlInput.trim()}
+            >
+              {isImportingUrl ? 'Importing...' : 'Import'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Missing Media Dialog */}
       <MissingMediaDialog />

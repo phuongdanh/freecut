@@ -107,6 +107,7 @@ export interface MediaLibraryActions {
    * Existing media are returned too so drop targets can place duplicates without re-importing.
    */
   importHandlesForPlacement: (handles: FileSystemFileHandle[]) => Promise<MediaMetadata[]>;
+  importMediaFromUrl: (url: string) => Promise<MediaMetadata & { hasUnsupportedCodec?: boolean }>;
   deleteMedia: (id: string) => Promise<void>;
   deleteMediaBatch: (ids: string[]) => Promise<void>;
 

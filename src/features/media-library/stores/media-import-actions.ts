@@ -115,7 +115,7 @@ function showImportNotifications(
 export function createImportActions(
   set: Set,
   get: Get
-): Pick<MediaLibraryActions, 'importMedia' | 'importHandles' | 'importHandlesForPlacement'> {
+): Pick<MediaLibraryActions, 'importMedia' | 'importHandles' | 'importHandlesForPlacement' | 'importMediaFromUrl'> {
   const createOptimisticImportTasks = async (handles: FileSystemFileHandle[]): Promise<ImportTask[]> => {
     const importTasks: ImportTask[] = [];
 
@@ -291,5 +291,43 @@ export function createImportActions(
 
     importHandlesForPlacement: async (handles: FileSystemFileHandle[]) =>
       importHandlesInternal(handles, { includeDuplicatesInResults: true }),
+      
+    importMediaFromUrl: async (url: string) => {
+      const { currentProjectId } = get();
+
+      if (!currentProjectId) {
+        set({ error: 'No project selected' });
+        throw new Error('No project selected');
+      }
+
+      const opId = createOperationId();
+      const event = logger.startEvent('importUrl', opId);
+      event.set('source', 'url');
+      event.set('projectId', currentProjectId);
+
+      try {
+        set({ isLoading: true });
+        const metadata = await mediaLibraryService.importMediaFromUrl(url, currentProjectId);
+
+        set((state) => ({
+          mediaItems: [metadata, ...state.mediaItems],
+          isLoading: false
+        }));
+
+        if (metadata.mimeType.startsWith('video/')) {
+          proxyService.setProxyKey(metadata.id, getSharedProxyKey(metadata));
+        }
+
+        event.success({ imported: 1 });
+        return metadata;
+      } catch (error) {
+        set({ isLoading: false });
+        if (error instanceof Error) {
+          set({ error: error.message });
+          event.failure(error);
+        }
+        throw error;
+      }
+    },
   };
 }

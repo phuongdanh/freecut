@@ -1,4 +1,4 @@
-﻿import type { MediaMetadata, ThumbnailData } from '@/types/storage';
+import type { MediaMetadata, ThumbnailData } from '@/types/storage';
 import { createLogger } from '@/shared/logging/logger';
 
 const logger = createLogger('MediaLibraryService');
@@ -25,6 +25,7 @@ import {
 } from '@/infrastructure/storage/indexeddb';
 import { gifFrameCache } from '@/features/media-library/deps/timeline-services';
 import { opfsService } from './opfs-service';
+import { isSocialVideoUrl } from '@/utils/video-url';
 import { proxyService } from './proxy-service';
 import { validateMediaFile, getMimeType } from '../utils/validation';
 import { getSharedProxyKey } from '../utils/proxy-key';
@@ -995,6 +996,167 @@ class MediaLibraryService {
     }
 
     return { cleaned: orphanedMetadata.length };
+  }
+
+  /**
+   * Import media from URL
+   */
+  async importMediaFromUrl(url: string, projectId: string): Promise<MediaMetadata & { hasUnsupportedCodec?: boolean }> {
+    if (!projectId) {
+      throw new Error('No project selected');
+    }
+
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) throw new Error('Empty URL');
+
+    let downloadUrl = trimmedUrl;
+    if (isSocialVideoUrl(trimmedUrl)) {
+      const apiResponse = await fetch("/api/external/get-download-url", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ video_source_url: trimmedUrl }),
+      });
+
+      if (!apiResponse.ok) {
+        throw new Error("Failed to fetch download URL from API");
+      }
+
+      const data = await apiResponse.json();
+      if (data?.data?.url) {
+        downloadUrl = data.data.url;
+      } else {
+        throw new Error("Invalid API response format");
+      }
+    }
+
+    const response = await fetch(downloadUrl);
+    if (!response.ok) {
+      throw new Error("Failed to fetch video from URL");
+    }
+
+    const blob = await response.blob();
+    let filename = "video-from-url";
+    try {
+      const urlObj = new URL(trimmedUrl);
+      const pathParts = urlObj.pathname.split("/");
+      const lastPart = pathParts[pathParts.length - 1];
+      if (lastPart) {
+        filename = lastPart;
+      }
+    } catch {
+      // ignore parse errors and keep default filename
+    }
+
+    if (!filename.includes(".")) {
+      if (blob.type.includes("video/mp4")) filename += ".mp4";
+      else if (blob.type.includes("audio/mp3")) filename += ".mp3";
+      else if (blob.type.includes("audio/wav")) filename += ".wav";
+      else filename += ".mp4";
+    }
+
+    let file: File;
+    try {
+      file = new File([blob], filename, {
+        type: blob.type || "video/mp4",
+      });
+    } catch {
+      file = Object.assign(blob, {
+        name: filename,
+        lastModified: Date.now()
+      }) as unknown as File;
+    }
+
+    const resolvedMimeType = getMimeType(file);
+    const mediaId = crypto.randomUUID();
+    const createdAt = Date.now();
+    const opfsPath = `content/${mediaId.slice(0, 2)}/${mediaId.slice(2, 4)}/${mediaId}/data`;
+
+    let metadataCreated = false;
+    let thumbnailSaved = false;
+
+    const { metadata, thumbnail } = await mediaProcessorService.processMedia(
+      file,
+      resolvedMimeType,
+      { thumbnailTimestamp: 1 }
+    );
+
+    const codec = metadata.type === 'video'
+      ? metadata.codec
+      : metadata.type === 'audio'
+        ? (metadata.codec || 'unknown')
+        : 'unknown';
+
+    const codecCheck = mediaProcessorService.hasUnsupportedAudioCodec(metadata);
+
+    const mediaMetadata: MediaMetadata = {
+      id: mediaId,
+      storageType: 'opfs',
+      opfsPath,
+      fileName: file.name,
+      fileSize: file.size,
+      mimeType: resolvedMimeType,
+      duration: 'duration' in metadata ? metadata.duration : 0,
+      width: 'width' in metadata ? metadata.width : 0,
+      height: 'height' in metadata ? metadata.height : 0,
+      fps: metadata.type === 'video' ? metadata.fps : 30,
+      codec,
+      bitrate: 'bitrate' in metadata ? (metadata.bitrate ?? 0) : 0,
+      audioCodec: metadata.type === 'video' ? metadata.audioCodec : undefined,
+      audioCodecSupported: metadata.type === 'video' ? metadata.audioCodecSupported : true,
+      tags: [],
+      createdAt,
+      updatedAt: createdAt,
+    };
+
+    try {
+      await opfsService.saveFile(opfsPath, await blobToArrayBuffer(file));
+
+      if (thumbnail) {
+        try {
+          const thumbnailId = crypto.randomUUID();
+          await saveThumbnailDB({
+            id: thumbnailId,
+            mediaId,
+            blob: thumbnail,
+            timestamp: 1,
+            width: 320,
+            height: 180,
+          });
+          mediaMetadata.thumbnailId = thumbnailId;
+          thumbnailSaved = true;
+        } catch (error) {
+          logger.warn(`Failed to save thumbnail for generated url media:`, error);
+        }
+      }
+
+      await createMediaDB(mediaMetadata);
+      metadataCreated = true;
+      await associateMediaWithProject(projectId, mediaId);
+
+      if (resolvedMimeType === 'image/gif') {
+        const blobUrl = URL.createObjectURL(file);
+        void gifFrameCache.getGifFrames(mediaId, blobUrl)
+          .catch((err) => logger.warn('Failed to pre-extract GIF frames:', err))
+          .finally(() => URL.revokeObjectURL(blobUrl));
+      }
+
+      return {
+        ...mediaMetadata,
+        hasUnsupportedCodec: codecCheck.unsupported,
+      };
+    } catch (error) {
+      if (metadataCreated) {
+        try { await deleteMediaDB(mediaId); } catch { /* ignore */ }
+      }
+      if (thumbnailSaved) {
+        this.clearThumbnailCache(mediaId);
+        try { await deleteThumbnailsByMediaId(mediaId); } catch { /* ignore */ }
+      }
+      try { await opfsService.deleteFile(opfsPath); } catch { /* ignore */ }
+      throw error;
+    }
   }
 }
 
