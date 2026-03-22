@@ -1,4 +1,5 @@
 import type { AudioItem, TextItem, TimelineItem, TimelineTrack } from '@/types/timeline';
+import { getAuthHeaders, toolsApiUrl } from '@/services/api';
 import { DEFAULT_TRACK_HEIGHT } from '../constants';
 import { addItems } from '../stores/actions/item-actions';
 import { setTracks } from '../stores/actions/track-actions';
@@ -6,7 +7,7 @@ import { useItemsStore } from '../stores/items-store';
 import { resolveMediaUrl } from '../deps/media-library-resolver';
 import { useMediaLibraryStore } from '../deps/media-library-store';
 
-/** Payload segment for the external TTS API (seconds). */
+/** Payload segment for the tools TTS API (seconds). */
 export interface TextToSpeechChunk {
   timestamp: [number, number];
   text: string;
@@ -40,7 +41,7 @@ export interface SynthesizeTextTrackOptions {
   languageCode: string;
   languageName: string;
   timelineFps: number;
-  /** POST target; dev server proxies `/api/external/*` to the backend. */
+  /** POST target; defaults to `{VITE_API_URL}/api/tools/text-to-speech`. */
   apiPath?: string;
 }
 
@@ -69,7 +70,7 @@ async function callTextToSpeechApi(
 ): Promise<TextToSpeechApiResult[]> {
   const response = await fetch(apiPath, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify({
       chunks,
       target_language_code: languageCode,
@@ -168,7 +169,7 @@ export async function synthesizeTextTrackToSpeech(
     languageCode,
     languageName,
     timelineFps,
-    apiPath = '/api/external/text-to-speech',
+    apiPath = toolsApiUrl('text-to-speech'),
   } = options;
 
   const allItems = useItemsStore.getState().items;

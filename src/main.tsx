@@ -1,4 +1,4 @@
-﻿import { StrictMode } from 'react';
+import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { toast } from 'sonner';
 import { App } from './app';
@@ -50,7 +50,7 @@ window.addEventListener('vite:preloadError', () => {
       },
     });
   } else {
-    // Not in the editor â€” safe to reload immediately
+    // Not in the editor — safe to reload immediately
     window.location.reload();
   }
 });

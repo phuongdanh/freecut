@@ -5,7 +5,6 @@ import {
   ChevronDown,
   Download,
   FolderArchive,
-  Github,
   Keyboard,
   Save,
   Settings,
@@ -56,7 +55,7 @@ export const Toolbar = memo(function Toolbar({
     if (isDirty) {
       setShowUnsavedDialog(true);
     } else {
-      navigate({ to: '/projects' });
+      navigate({ to: '/' });
     }
   };
 
@@ -141,23 +140,6 @@ export const Toolbar = memo(function Toolbar({
           aria-label="Keyboard shortcuts"
         >
           <Keyboard className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="h-7 w-7"
-          asChild
-        >
-          <a
-            href="https://github.com/walterlow/freecut"
-            target="_blank"
-            rel="noopener noreferrer"
-            data-tooltip="View on GitHub"
-            data-tooltip-side="left"
-            aria-label="View on GitHub"
-          >
-            <Github className="h-4 w-4" />
-          </a>
         </Button>
         <Button
           variant="outline"

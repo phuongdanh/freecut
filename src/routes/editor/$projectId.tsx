@@ -1,7 +1,11 @@
-﻿import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute } from '@tanstack/react-router';
+import { requireAuth } from '@/features/auth/require-auth';
 import { getProject } from '@/infrastructure/storage/indexeddb';
 
 export const Route = createFileRoute('/editor/$projectId')({
+  beforeLoad: (ctx) => {
+    requireAuth(ctx);
+  },
   loader: async ({ params }) => {
     // Validate project exists - actual loading happens in Editor via loadTimeline
     const project = await getProject(params.projectId);

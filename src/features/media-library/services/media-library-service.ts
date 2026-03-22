@@ -31,6 +31,7 @@ import { validateMediaFile, getMimeType } from '../utils/validation';
 import { getSharedProxyKey } from '../utils/proxy-key';
 import { mediaProcessorService } from './media-processor-service';
 import { generateThumbnail } from '../utils/thumbnail-generator';
+import { getAuthHeaders, toolsApiUrl } from '@/services/api';
 
 function getImageDimensionsFromBitmap(bitmap: ImageBitmap): { width: number; height: number } {
   return {
@@ -1011,11 +1012,9 @@ class MediaLibraryService {
 
     let downloadUrl = trimmedUrl;
     if (isSocialVideoUrl(trimmedUrl)) {
-      const apiResponse = await fetch("/api/external/get-download-url", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+      const apiResponse = await fetch(toolsApiUrl('get-download-url'), {
+        method: 'POST',
+        headers: getAuthHeaders(),
         body: JSON.stringify({ video_source_url: trimmedUrl }),
       });
 

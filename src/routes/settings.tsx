@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
+import { requireAuth } from '@/features/auth/require-auth';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Combobox } from '@/components/ui/combobox';
@@ -28,6 +29,9 @@ import {
 import type { MediaTranscriptModel, MediaTranscriptQuantization } from '@/types/storage';
 
 export const Route = createFileRoute('/settings')({
+  beforeLoad: (ctx) => {
+    requireAuth(ctx);
+  },
   component: Settings,
 });
 
@@ -80,7 +84,7 @@ function Settings() {
       <div className="panel-header border-b border-border">
         <div className="max-w-4xl mx-auto px-6 py-5 flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Link to="/projects">
+            <Link to="/">
               <Button variant="ghost" size="icon">
                 <ArrowLeft className="w-5 h-5" />
               </Button>

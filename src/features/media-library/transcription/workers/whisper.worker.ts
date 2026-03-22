@@ -6,6 +6,7 @@ import type {
 } from '../types';
 import { createLogger } from '@/shared/logging/logger';
 import { LANGUAGES } from '@/constants/language-constants';
+import { toolsApiUrl } from '@/services/tools-api-paths';
 
 const logger = createLogger('TranscriptionWorker');
 
@@ -53,6 +54,7 @@ let pipelineReady = false;
 const queue: PCMChunk[] = [];
 let processing = false;
 let reportedEstimatedBytes = 0;
+let toolsAuthToken: string | undefined;
 
 function getLanguageName(code: string): string {
   const match = LANGUAGES.find((lang: { code: string; name: string }) => lang.code === code);
@@ -82,16 +84,18 @@ async function translateSegments({
       text: JSON.stringify({ chunks }),
     };
 
-    const apiUrl = new URL(
-      '/api/external/translate',
-      self.location?.origin ?? 'http://localhost:3000'
-    ).toString();
+    const apiUrl = toolsApiUrl('translate');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (toolsAuthToken) {
+      headers.Authorization = `Bearer ${toolsAuthToken}`;
+    }
 
     const response = await fetch(apiUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(requestBody),
     });
 
@@ -134,6 +138,7 @@ self.onmessage = async (event: MessageEvent) => {
   if (message.type === 'init') {
     language = message.language;
     targetLanguage = message.targetLanguage;
+    toolsAuthToken = message.authToken;
     await initPipeline(message.modelId, message.quantization ?? 'hybrid');
   }
 };

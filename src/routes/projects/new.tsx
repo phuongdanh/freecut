@@ -1,4 +1,5 @@
-﻿import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
+import { createFileRoute, Link, useNavigate } from '@tanstack/react-router';
+import { requireAuth } from '@/features/auth/require-auth';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { createLogger } from '@/shared/logging/logger';
@@ -14,7 +15,8 @@ const logger = createLogger('NewProject');
 
 export const Route = createFileRoute('/projects/new')({
   component: NewProject,
-  beforeLoad: async () => {
+  beforeLoad: async (ctx) => {
+    requireAuth(ctx);
     try {
       const { loadProjects } = useProjectStore.getState();
       await loadProjects();

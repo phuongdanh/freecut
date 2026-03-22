@@ -228,7 +228,7 @@ export function ProjectForm({
                 Cancel
               </Button>
             ) : (
-              <Link to="/projects">
+              <Link to="/">
                 <Button type="button" variant="outline" size="lg" disabled={isSubmitting}>
                   Cancel
                 </Button>

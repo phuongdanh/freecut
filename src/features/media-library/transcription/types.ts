@@ -51,6 +51,8 @@ export type WhisperWorkerMessage =
       language?: string;
       targetLanguage?: string;
       quantization?: QuantizationType;
+      /** JWT for tools API (workers cannot read localStorage). */
+      authToken?: string;
     };
 
 export const MODEL_IDS: Record<WhisperModel, string> = {

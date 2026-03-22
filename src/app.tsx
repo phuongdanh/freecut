@@ -4,6 +4,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { GlobalTooltip } from '@/components/ui/global-tooltip';
 import { Toaster } from '@/components/ui/sonner';
 import { ErrorBoundary } from '@/components/error-boundary';
+import { AuthProvider } from '@/features/auth/auth-context';
 import { routeTree } from './routeTree.gen';
 
 const router = createRouter({ routeTree });
@@ -54,11 +55,13 @@ export function App() {
   // ErrorBoundary for graceful error recovery
   return (
     <ErrorBoundary level="app">
-      <TooltipProvider delayDuration={300}>
-        <RouterProvider router={router} />
-        <GlobalTooltip />
-        <Toaster />
-      </TooltipProvider>
+      <AuthProvider>
+        <TooltipProvider delayDuration={300}>
+          <RouterProvider router={router} />
+          <GlobalTooltip />
+          <Toaster />
+        </TooltipProvider>
+      </AuthProvider>
     </ErrorBoundary>
   );
 }

@@ -1,13 +1,10 @@
-import { defineConfig, loadEnv } from 'vite'
+import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
 
 // https://vite.dev/config/
-export default defineConfig(({ mode }) => {
-  const env = loadEnv(mode, process.cwd(), '');
-
-  return {
+export default defineConfig({
   envPrefix: ['VITE_', 'API_'],
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -22,15 +19,6 @@ export default defineConfig(({ mode }) => {
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Cross-Origin-Opener-Policy': 'same-origin',
     },
-    proxy: {
-      '/api/external': {
-        target: env.VITE_API_URL || env.API_URL || 'http://localhost:8080',
-        changeOrigin: true,
-        headers: {
-          'X-API-Key': env.VITE_API_SECRET_KEY || 'abc'
-        }
-      }
-    }
   },
   preview: {
     headers: {
@@ -129,5 +117,4 @@ export default defineConfig(({ mode }) => {
     // Pre-bundle lucide-react for faster dev startup (avoids analyzing 1500+ icons on each reload)
     include: ['lucide-react'],
   },
-  };
 });

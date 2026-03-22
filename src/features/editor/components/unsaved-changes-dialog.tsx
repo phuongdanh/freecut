@@ -37,7 +37,7 @@ export function UnsavedChangesDialog({
     try {
       await onSave();
       onOpenChange(false);
-      navigate({ to: '/projects' });
+      navigate({ to: '/' });
     } catch (error) {
       logger.error('Failed to save project:', error);
       // Keep dialog open on error
@@ -48,7 +48,7 @@ export function UnsavedChangesDialog({
 
   const handleDiscard = () => {
     onOpenChange(false);
-    navigate({ to: '/projects' });
+    navigate({ to: '/' });
   };
 
   return (

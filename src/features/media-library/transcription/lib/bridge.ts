@@ -11,6 +11,7 @@ import { MODEL_IDS } from '../types';
 import { createManagedWorkerSession } from '@/shared/utils/managed-worker-session';
 import { Chunker } from './chunker';
 import { downmixToMono, resampleTo16kHz } from './resampler';
+import { getBearerToken } from '@/services/api';
 
 export interface BridgeCallbacks {
   onSegment: (segment: TranscriptSegment) => void;
@@ -95,7 +96,14 @@ export class Bridge {
     });
 
     whisperWorker.postMessage({ type: 'port', port: port2 }, [port2]);
-    whisperWorker.postMessage({ type: 'init', modelId, language, targetLanguage, quantization });
+    whisperWorker.postMessage({
+      type: 'init',
+      modelId,
+      language,
+      targetLanguage,
+      quantization,
+      authToken: getBearerToken(),
+    });
 
     if (hasWebCodecs) {
       this.session.getWorker('decoder').postMessage({ type: 'init', file });
