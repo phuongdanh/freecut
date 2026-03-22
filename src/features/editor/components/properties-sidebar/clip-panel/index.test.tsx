@@ -81,6 +81,7 @@ function resetStores(items: Array<VideoItem | AudioItem>, selectedItemIds: strin
 
   useSelectionStore.setState({
     selectedItemIds,
+    lastClickedItemId: null,
     selectedMarkerId: null,
     selectedTransitionId: null,
     selectedTrackId: null,

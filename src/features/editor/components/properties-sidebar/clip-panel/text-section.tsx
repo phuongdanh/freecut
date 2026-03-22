@@ -34,6 +34,7 @@ import {
   PropertySection,
   PropertyRow,
   NumberInput,
+  SliderInput,
   ColorPicker,
 } from '../components';
 import { FontPicker } from './font-picker';
@@ -45,6 +46,12 @@ import {
   type TextAnimationPhase,
   type TextAnimationPresetOptionId,
 } from './text-animation-presets';
+import {
+  hexToRgb,
+  parseCssColorToRgba,
+  rgbToHex,
+  rgbaComponentsToCss,
+} from '@/shared/utils/css-color';
 
 const FONT_WEIGHT_OPTIONS = [
   { value: 'normal', label: 'Regular' },
@@ -64,6 +71,9 @@ const EMPTY_TEXT_STROKE: NonNullable<TextItem['stroke']> = {
   width: 0,
   color: '#111827',
 };
+
+/** Default when parsing missing background — transparent box in UI */
+const BG_PARSE_FALLBACK = { r: 0, g: 0, b: 0, a: 0 } as const;
 
 const TEXT_EFFECT_PRESETS = [
   {
@@ -182,6 +192,11 @@ export function TextSection({ items, canvas }: TextSectionProps) {
       fontStyle: textItems.every(i => (i.fontStyle ?? 'normal') === (first.fontStyle ?? 'normal')) ? (first.fontStyle ?? 'normal') : undefined,
       underline: textItems.every(i => (i.underline ?? false) === (first.underline ?? false)) ? (first.underline ?? false) : undefined,
       color: textItems.every(i => i.color === first.color) ? first.color : undefined,
+      backgroundColor: textItems.every(
+        (i) => (i.backgroundColor ?? '') === (first.backgroundColor ?? '')
+      )
+        ? first.backgroundColor
+        : undefined,
       textAlign: textItems.every(i => (i.textAlign ?? 'center') === (first.textAlign ?? 'center')) ? (first.textAlign ?? 'center') : undefined,
       verticalAlign: textItems.every(i => (i.verticalAlign ?? 'middle') === (first.verticalAlign ?? 'middle')) ? (first.verticalAlign ?? 'middle') : undefined,
       letterSpacing: textItems.every(i => (i.letterSpacing ?? 0) === (first.letterSpacing ?? 0)) ? (first.letterSpacing ?? 0) : 'mixed' as const,
@@ -346,6 +361,72 @@ export function TextSection({ items, canvas }: TextSectionProps) {
       finalizePreviewChange();
     },
     [finalizePreviewChange, updateTextItems]
+  );
+
+  const handleBackgroundHexLiveChange = useCallback(
+    (hex: string) => {
+      const rgb = hexToRgb(hex);
+      if (!rgb) return;
+      const base = parseCssColorToRgba(textItems[0]?.backgroundColor, BG_PARSE_FALLBACK);
+      const a = base.a === 0 ? 1 : base.a;
+      const css = rgbaComponentsToCss({ ...rgb, a });
+      const previews: Record<string, ItemPropertiesPreview> = {};
+      itemIds.forEach((id) => {
+        previews[id] = { backgroundColor: css };
+      });
+      setPropertiesPreviewNew(previews);
+    },
+    [itemIds, setPropertiesPreviewNew, textItems]
+  );
+
+  const handleBackgroundHexChange = useCallback(
+    (hex: string) => {
+      const rgb = hexToRgb(hex);
+      if (!rgb) return;
+      const base = parseCssColorToRgba(textItems[0]?.backgroundColor, BG_PARSE_FALLBACK);
+      const a = base.a === 0 ? 1 : base.a;
+      updateTextItems({ backgroundColor: rgbaComponentsToCss({ ...rgb, a }) });
+      finalizePreviewChange();
+    },
+    [finalizePreviewChange, textItems, updateTextItems]
+  );
+
+  const handleBackgroundOpacityLiveChange = useCallback(
+    (percent: number) => {
+      const a = percent / 100;
+      const previews: Record<string, ItemPropertiesPreview> = {};
+      itemIds.forEach((id) => {
+        const item = textItems.find((t) => t.id === id);
+        if (!item) return;
+        const cur = parseCssColorToRgba(item.backgroundColor, { r: 0, g: 0, b: 0, a: 1 });
+        const bg: string | undefined =
+          a === 0 ? 'transparent' : rgbaComponentsToCss({ r: cur.r, g: cur.g, b: cur.b, a });
+        previews[id] = { backgroundColor: bg };
+      });
+      setPropertiesPreviewNew(previews);
+    },
+    [itemIds, setPropertiesPreviewNew, textItems]
+  );
+
+  const handleBackgroundOpacityChange = useCallback(
+    (percent: number) => {
+      const a = percent / 100;
+      if (a === 0) {
+        textItems.forEach((item) => {
+          updateItem(item.id, { backgroundColor: undefined });
+        });
+        finalizePreviewChange();
+        return;
+      }
+      textItems.forEach((item) => {
+        const cur = parseCssColorToRgba(item.backgroundColor, { r: 0, g: 0, b: 0, a: 1 });
+        updateItem(item.id, {
+          backgroundColor: rgbaComponentsToCss({ r: cur.r, g: cur.g, b: cur.b, a }),
+        });
+      });
+      finalizePreviewChange();
+    },
+    [finalizePreviewChange, textItems, updateItem]
   );
 
   const handleTextAlignChange = useCallback(
@@ -613,18 +694,38 @@ export function TextSection({ items, canvas }: TextSectionProps) {
   const shadowBlur = sharedValues.shadowBlur;
   const strokeWidth = sharedValues.strokeWidth;
 
+  const bgParsed = parseCssColorToRgba(
+    sharedValues.backgroundColor ?? textItems[0]?.backgroundColor,
+    BG_PARSE_FALLBACK
+  );
+  const bgHexForPicker = rgbToHex(bgParsed.r, bgParsed.g, bgParsed.b);
+  const backgroundOpacityDisplay: number | 'mixed' = (() => {
+    const alphas = textItems.map((item) =>
+      parseCssColorToRgba(item.backgroundColor, BG_PARSE_FALLBACK).a
+    );
+    const first = alphas[0]!;
+    return alphas.every((x) => Math.abs(x - first) < 0.002) ? Math.round(first * 100) : 'mixed';
+  })();
+
   return (
     <>
       <PropertySection title="Text" icon={Type} defaultOpen={true}>
-        {/* Text Content */}
+        {/* Text content: only editable for a single clip — bulk caption text is ambiguous */}
         <PropertyRow label="Content">
-          <Textarea
-            value={sharedValues.text ?? ''}
-            onChange={handleTextChange}
-            placeholder={sharedValues.text === undefined ? 'Mixed' : 'Enter text...'}
-            className="min-h-[60px] text-xs flex-1 min-w-0"
-            rows={3}
-          />
+          {textItems.length > 1 ? (
+            <p className="text-xs text-muted-foreground leading-relaxed flex-1 min-w-0 rounded-md border border-border/60 bg-muted/30 px-2.5 py-2">
+              Select one clip to edit its text. Font, color, alignment, and other settings below still apply to all{' '}
+              {textItems.length} selected clips.
+            </p>
+          ) : (
+            <Textarea
+              value={sharedValues.text ?? ''}
+              onChange={handleTextChange}
+              placeholder="Enter text..."
+              className="min-h-[60px] text-xs flex-1 min-w-0"
+              rows={3}
+            />
+          )}
         </PropertyRow>
 
         {/* Font Family */}
@@ -780,6 +881,38 @@ export function TextSection({ items, canvas }: TextSectionProps) {
           onReset={() => handleColorChange('#ffffff')}
           defaultColor="#ffffff"
         />
+
+        <PropertyRow
+          label="Background"
+          tooltip="Color and opacity of the box behind the text. Separate from Transform → Fill (whole clip). At 0% opacity the background is removed."
+        >
+          <div className="flex flex-col gap-2 w-full min-w-0">
+            <ColorPicker
+              color={bgHexForPicker}
+              onChange={handleBackgroundHexChange}
+              onLiveChange={handleBackgroundHexLiveChange}
+              onReset={() => {
+                updateTextItems({
+                  backgroundColor: rgbaComponentsToCss({ r: 0, g: 0, b: 0, a: 1 }),
+                });
+                finalizePreviewChange();
+              }}
+              defaultColor="#000000"
+              presets={['#000000', '#1a1a1a', '#ffffff']}
+            />
+            <SliderInput
+              value={backgroundOpacityDisplay}
+              onChange={handleBackgroundOpacityChange}
+              onLiveChange={handleBackgroundOpacityLiveChange}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+              formatValue={(v) => `${v}%`}
+              className="w-full"
+            />
+          </div>
+        </PropertyRow>
 
         {/* Letter Spacing */}
         <PropertyRow label="Spacing">

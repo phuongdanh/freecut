@@ -9,6 +9,7 @@ describe('selection-store', () => {
   it('has correct initial state', () => {
     const state = useSelectionStore.getState();
     expect(state.selectedItemIds).toEqual([]);
+    expect(state.lastClickedItemId).toBe(null);
     expect(state.selectedMarkerId).toBe(null);
     expect(state.selectedTransitionId).toBe(null);
     expect(state.selectedTrackIds).toEqual([]);
@@ -43,6 +44,12 @@ describe('selection-store', () => {
       useSelectionStore.getState().selectTracks(['track-1']);
       useSelectionStore.getState().selectItems([]);
       expect(useSelectionStore.getState().selectionType).toBe('track');
+    });
+
+    it('clears lastClickedItemId when selecting empty array', () => {
+      useSelectionStore.getState().setLastClickedItemId('item-1');
+      useSelectionStore.getState().selectItems([]);
+      expect(useSelectionStore.getState().lastClickedItemId).toBe(null);
     });
   });
 

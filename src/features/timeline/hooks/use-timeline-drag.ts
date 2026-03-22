@@ -299,9 +299,14 @@ export function useTimelineDrag(
       const currentSelectedIds = selectedItemIdsRef.current;
       const isInSelection = currentSelectedIds.includes(item.id);
 
-      // If not in selection, select it (multi-select handled by TimelineItem's onClick)
-      if (!isInSelection) {
+      // If not in selection, select it on mousedown so drag + visuals match immediately.
+      // Do NOT do this when Ctrl/Cmd/Shift are held: click runs after mousedown and would
+      // add/range-select — an early selectItems([item.id]) here would wipe the existing
+      // multi-selection before onClick can merge (e.g. Cmd+click a second caption clip).
+      const isMultiSelectGesture = e.ctrlKey || e.metaKey || e.shiftKey;
+      if (!isInSelection && !isMultiSelectGesture) {
         selectItems([item.id]);
+        useSelectionStore.getState().setLastClickedItemId(item.id);
       }
 
       // Determine which items to drag

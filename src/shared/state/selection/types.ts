@@ -1,5 +1,7 @@
 export interface SelectionState {
   selectedItemIds: string[];
+  /** Anchor for Shift+click range selection among clips (not used for track selection). */
+  lastClickedItemId: string | null;
   selectedMarkerId: string | null; // Selected marker ID
   selectedTransitionId: string | null; // Selected transition ID
   selectedTrackId: string | null; // Deprecated: use activeTrackId
@@ -22,6 +24,7 @@ export interface SelectionState {
 
 export interface SelectionActions {
   selectItems: (ids: string[]) => void;
+  setLastClickedItemId: (id: string | null) => void;
   selectMarker: (id: string | null) => void; // Select a marker
   selectTransition: (id: string | null) => void; // Select a transition
   selectTrack: (id: string | null) => void; // Deprecated: use setActiveTrack

@@ -150,7 +150,7 @@ body.timeline-item-drag-cursor-not-allowed * {
 .track-header-item {
   content-visibility: auto;
   contain-intrinsic-size:
-    var(--editor-timeline-sidebar-width, 176px)
+    var(--editor-timeline-sidebar-width, 188px)
     var(--editor-timeline-track-height, 72px);
 }
 

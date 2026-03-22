@@ -57,6 +57,7 @@ import type { MediaTranscriptModel } from '@/types/storage';
 import { WHISPER_MODEL_LABELS } from '@/shared/utils/whisper-settings';
 import { isLocalInferenceCancellationError } from '@/shared/state/local-inference';
 import { getTranscriptionOverallPercent } from '@/shared/utils/transcription-progress';
+import { getSameTrackSameTypeRangeIds } from '@/features/timeline/utils/item-selection-utils';
 const CAPTION_GENERATION_OVERLAY_ID = 'caption-generation';
 const EMPTY_SEGMENT_OVERLAYS = [] as const;
 
@@ -858,21 +859,66 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
       // Keep selection focused on the split clip so downstream panels
       // (like transitions) immediately evaluate the new adjacency.
       useSelectionStore.getState().selectItems([item.id]);
+      useSelectionStore.getState().setLastClickedItemId(item.id);
       return;
     }
 
-    // Selection tool: handle item selection
-    const { selectedItemIds, selectItems } = useSelectionStore.getState();
+    // Selection tool: multi-select timeline clips (items), not tracks — Ctrl/Cmd toggle, Shift range
+    const {
+      selectedItemIds,
+      selectItems,
+      lastClickedItemId,
+      setLastClickedItemId,
+    } = useSelectionStore.getState();
+    const allItems = useTimelineStore.getState().items;
+
+    if (e.shiftKey) {
+      const anchorId =
+        lastClickedItemId ??
+        (selectedItemIds.length > 0 ? selectedItemIds[selectedItemIds.length - 1]! : null);
+      const anchorStillValid =
+        anchorId !== null && allItems.some((i) => i.id === anchorId);
+      if (anchorId && anchorStillValid) {
+        const rangeIds = getSameTrackSameTypeRangeIds(allItems, anchorId, item.id);
+        if (rangeIds && rangeIds.length > 0) {
+          selectItems(rangeIds);
+          setLastClickedItemId(item.id);
+          return;
+        }
+      }
+      selectItems([item.id]);
+      setLastClickedItemId(item.id);
+      return;
+    }
+
     if (e.metaKey || e.ctrlKey) {
       if (selectedItemIds.includes(item.id)) {
         selectItems(selectedItemIds.filter((id) => id !== item.id));
-      } else {
-        selectItems([...selectedItemIds, item.id]);
+        setLastClickedItemId(item.id);
+        return;
       }
-    } else {
-      selectItems([item.id]);
+      if (selectedItemIds.length === 0) {
+        selectItems([item.id]);
+        setLastClickedItemId(item.id);
+        return;
+      }
+      const selectedItems = selectedItemIds
+        .map((id) => allItems.find((i) => i.id === id))
+        .filter((i): i is TimelineItemType => i !== undefined);
+      const first = selectedItems[0];
+      if (!first || first.trackId !== item.trackId || first.type !== item.type) {
+        selectItems([item.id]);
+        setLastClickedItemId(item.id);
+        return;
+      }
+      selectItems([...selectedItemIds, item.id]);
+      setLastClickedItemId(item.id);
+      return;
     }
-  }, [trackLocked, frameToPixels, pixelsToFrame, item.from, item.id]);
+
+    selectItems([item.id]);
+    setLastClickedItemId(item.id);
+  }, [trackLocked, frameToPixels, pixelsToFrame, item.from, item.id, item.trackId, item.type]);
 
   // Double-click: open media in source monitor with clip's source range as I/O
   // For composition items: enter the sub-composition for editing

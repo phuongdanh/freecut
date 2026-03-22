@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Canvas Item Renderer
  *
  * Per-item render helpers that draw individual timeline items (video, image,
@@ -828,6 +828,12 @@ function renderTextItem(
     ctx.beginPath();
     ctx.rect(itemLeft, itemTop, transform.width, transform.height);
     ctx.clip();
+  }
+
+  // Match text-content.tsx: outer div fills the item box with backgroundColor (rgba).
+  if (item.backgroundColor) {
+    ctx.fillStyle = item.backgroundColor;
+    ctx.fillRect(itemLeft, itemTop, transform.width, transform.height);
   }
 
   ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px "${fontFamily}", sans-serif`;

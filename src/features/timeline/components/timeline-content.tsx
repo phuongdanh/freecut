@@ -42,6 +42,8 @@ import type { RazorSnapTarget } from '../utils/razor-snap';
 import { useMarkersStore } from '../stores/markers-store';
 import { useTransitionsStore } from '../stores/transitions-store';
 import { getFilteredItemSnapEdges } from '../utils/timeline-snap-utils';
+import { filterIdsToLargestHomogeneousGroup } from '../utils/item-selection-utils';
+import type { TimelineItem } from '@/types/timeline';
 
 
 interface TimelineContentProps {
@@ -396,7 +398,19 @@ export const TimelineContent = memo(function TimelineContent({
     containerRef: containerRef as React.RefObject<HTMLElement>,
     items: marqueeItems,
     onSelectionChange: (ids) => {
-      selectItems(ids);
+      const items = useTimelineStore.getState().items;
+      const filtered = filterIdsToLargestHomogeneousGroup(items, ids);
+      selectItems(filtered);
+      if (filtered.length > 0) {
+        const sorted = filtered
+          .map((id) => items.find((i) => i.id === id))
+          .filter((i): i is TimelineItem => i !== undefined)
+          .sort((a, b) => a.from - b.from);
+        const end = sorted[sorted.length - 1];
+        if (end) {
+          useSelectionStore.getState().setLastClickedItemId(end.id);
+        }
+      }
     },
     enabled: true,
     threshold: 5,

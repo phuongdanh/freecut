@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useMemo, memo, useCallback } from 'react';
-import { Search, Filter, SortAsc, Video, FileAudio, Image as ImageIcon, Trash2, Grid3x3, List, AlertTriangle, Info, X, FolderOpen, Link2Off, ChevronRight, Film, ArrowLeft, Zap, Loader2, Copy, Check, Upload, Link } from 'lucide-react';
+import { Search, Filter, Video, FileAudio, Image as ImageIcon, Trash2, Grid3x3, List, AlertTriangle, Info, X, FolderOpen, Link2Off, ChevronRight, Film, ArrowLeft, Zap, Loader2, Copy, Check, Upload, Link } from 'lucide-react';
 import { createLogger } from '@/shared/logging/logger';
 
 const logger = createLogger('MediaLibrary');
@@ -103,8 +103,6 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
   const setSearchQuery = useMediaLibraryStore((s) => s.setSearchQuery);
   const filterByType = useMediaLibraryStore((s) => s.filterByType);
   const setFilterByType = useMediaLibraryStore((s) => s.setFilterByType);
-  const sortBy = useMediaLibraryStore((s) => s.sortBy);
-  const setSortBy = useMediaLibraryStore((s) => s.setSortBy);
   const viewMode = useMediaLibraryStore((s) => s.viewMode);
   const setViewMode = useMediaLibraryStore((s) => s.setViewMode);
   const selectedMediaIds = useMediaLibraryStore((s) => s.selectedMediaIds);
@@ -649,40 +647,6 @@ export const MediaLibrary = memo(function MediaLibrary({ onMediaSelect }: MediaL
               >
                 <ImageIcon className="w-3 h-3 mr-2" />
                 Image
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          {/* Sort by */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-6 bg-secondary border border-border text-muted-foreground hover:border-primary/50 hover:text-primary text-[10px] px-2"
-              >
-                <SortAsc className="w-2.5 h-2.5 mr-1" />
-                {sortBy === 'name' ? 'NAME' : sortBy === 'date' ? 'DATE' : 'SIZE'}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="bg-popover border border-border">
-              <DropdownMenuItem
-                onClick={() => setSortBy('date')}
-                className="text-xs hover:bg-accent hover:text-accent-foreground"
-              >
-                Date (Newest)
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => setSortBy('name')}
-                className="text-xs hover:bg-accent hover:text-accent-foreground"
-              >
-                Name (A-Z)
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => setSortBy('size')}
-                className="text-xs hover:bg-accent hover:text-accent-foreground"
-              >
-                Size (Largest)
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
