@@ -1664,6 +1664,25 @@ export async function createCompositionRenderer(
       return scrubbingCache;
     },
 
+    /** Get the offscreen canvas this renderer draws into. */
+    getCanvas(): OffscreenCanvas {
+      return canvas;
+    },
+
+    /**
+     * Eagerly initialize the GPU effects + transition pipelines so the first
+     * transition frame doesn't pay the ~100-150ms WebGPU device + shader
+     * compilation cost. Safe to call multiple times — no-ops if already warm.
+     */
+    async warmGpuPipeline(): Promise<void> {
+      const pipeline = await ensureGpuPipeline();
+      if (pipeline) {
+        ensureGpuTransitionPipeline();
+        itemRenderContext.gpuPipeline = pipeline;
+        itemRenderContext.gpuTransitionPipeline = gpuTransitionPipeline;
+      }
+    },
+
     dispose() {
       isDisposed = true;
       inFlightInitByItem.clear();
