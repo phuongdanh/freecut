@@ -1,4 +1,4 @@
-import { memo, ReactNode, useState, useMemo } from 'react';
+import { memo, ReactNode, useState, useMemo, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   ContextMenu,
@@ -18,6 +18,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { PromptForm, type PromptFormValues } from '@/components/common/prompt-form';
 import { Label } from '@/components/ui/label';
 import {
   Select,
@@ -36,6 +37,15 @@ import {
   WHISPER_MODEL_LABELS,
   WHISPER_MODEL_OPTIONS,
 } from '@/shared/utils/whisper-settings';
+import {
+  CAPTION_TRANSLATION_PROMPT_TYPE,
+  createPrompt,
+  listPrompts,
+  type PromptRecord,
+} from '@/services/prompt';
+
+/** Sentinel value for "no translation prompt" in the caption dialog select. */
+const CAPTION_PROMPT_NONE_VALUE = '__none__';
 
 /** Languages shown in the segment caption dialog (Whisper codes). */
 const CAPTION_DIALOG_LANGUAGES: ReadonlyArray<{ value: string; label: string }> = [
@@ -58,6 +68,8 @@ function getInitialCaptionSourceLanguage(defaultCaptionLanguage: string | undefi
 interface CaptionGenerationOptions {
   language?: string;
   targetLanguage?: string;
+  /** Sent to translate API only when translating and a prompt is selected. */
+  translationPrompt?: string;
 }
 
 interface ItemContextMenuProps {
@@ -142,7 +154,43 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   const [captionModel, setCaptionModel] = useState<MediaTranscriptModel | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState(WHISPER_AUTO_LANGUAGE_VALUE);
   const [targetLanguage, setTargetLanguage] = useState(WHISPER_AUTO_LANGUAGE_VALUE);
+  const [captionPrompts, setCaptionPrompts] = useState<PromptRecord[]>([]);
+  const [captionPromptsLoading, setCaptionPromptsLoading] = useState(false);
+  const [selectedCaptionPromptId, setSelectedCaptionPromptId] = useState(CAPTION_PROMPT_NONE_VALUE);
+  const [newCaptionPromptDialogOpen, setNewCaptionPromptDialogOpen] = useState(false);
+  const [newCaptionPromptFormKey, setNewCaptionPromptFormKey] = useState(0);
+  const [newCaptionPromptError, setNewCaptionPromptError] = useState<string | null>(null);
+  const [creatingCaptionPrompt, setCreatingCaptionPrompt] = useState(false);
   const selectedCount = useSelectionStore((s) => s.selectedItemIds.length);
+
+  const isCaptionTranslating = useMemo(
+    () =>
+      targetLanguage !== WHISPER_AUTO_LANGUAGE_VALUE
+      && targetLanguage !== sourceLanguage,
+    [targetLanguage, sourceLanguage],
+  );
+
+  useEffect(() => {
+    if (!captionDialogOpen || !isCaptionTranslating) {
+      return;
+    }
+    let cancelled = false;
+    setCaptionPromptsLoading(true);
+    void listPrompts(CAPTION_TRANSLATION_PROMPT_TYPE)
+      .then((rows) => {
+        if (!cancelled) {
+          setCaptionPrompts(rows);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCaptionPromptsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [captionDialogOpen, isCaptionTranslating]);
   // Filter to only properties that actually have keyframes
   const propertiesWithKeyframes = useMemo(() => {
     if (!keyframedProperties) return [];
@@ -160,6 +208,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
     setCaptionModel(model);
     setSourceLanguage(getInitialCaptionSourceLanguage(defaultCaptionLanguage));
     setTargetLanguage(WHISPER_AUTO_LANGUAGE_VALUE);
+    setSelectedCaptionPromptId(CAPTION_PROMPT_NONE_VALUE);
     setCaptionDialogOpen(true);
   };
 
@@ -173,9 +222,22 @@ export const ItemContextMenu = memo(function ItemContextMenu({
       ? targetLanguage
       : undefined;
 
+    let translationPrompt: string | undefined;
+    if (
+      translatedTargetLanguage
+      && selectedCaptionPromptId !== CAPTION_PROMPT_NONE_VALUE
+    ) {
+      const picked = captionPrompts.find((p) => String(p.id) === selectedCaptionPromptId);
+      const trimmed = picked?.prompt.trim();
+      if (trimmed) {
+        translationPrompt = trimmed;
+      }
+    }
+
     const options: CaptionGenerationOptions = {
       language,
       targetLanguage: translatedTargetLanguage,
+      ...(translationPrompt !== undefined ? { translationPrompt } : {}),
     };
 
     if (captionAction === 'generate') {
@@ -185,6 +247,30 @@ export const ItemContextMenu = memo(function ItemContextMenu({
     }
 
     setCaptionDialogOpen(false);
+  };
+
+  const handleCreateCaptionPrompt = (values: PromptFormValues) => {
+    setCreatingCaptionPrompt(true);
+    setNewCaptionPromptError(null);
+    void createPrompt({
+      name: values.name,
+      type: CAPTION_TRANSLATION_PROMPT_TYPE,
+      prompt: values.prompt,
+    })
+      .then((created) => {
+        setCaptionPrompts((prev) => {
+          const rest = prev.filter((p) => p.id !== created.id);
+          return [created, ...rest];
+        });
+        setSelectedCaptionPromptId(String(created.id));
+        setNewCaptionPromptDialogOpen(false);
+      })
+      .catch((e: unknown) => {
+        setNewCaptionPromptError(e instanceof Error ? e.message : 'Failed to create prompt');
+      })
+      .finally(() => {
+        setCreatingCaptionPrompt(false);
+      });
   };
 
   return (
@@ -411,6 +497,50 @@ export const ItemContextMenu = memo(function ItemContextMenu({
                 </SelectContent>
               </Select>
             </div>
+
+            {isCaptionTranslating && (
+              <div className="flex flex-col gap-2">
+                <div className="flex items-end gap-2">
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
+                    <Label>Translation prompt</Label>
+                    <Select
+                      value={selectedCaptionPromptId}
+                      onValueChange={setSelectedCaptionPromptId}
+                      disabled={captionPromptsLoading}
+                    >
+                      <SelectTrigger>
+                        <SelectValue
+                          placeholder={
+                            captionPromptsLoading ? 'Loading…' : 'Select prompt'
+                          }
+                        />
+                      </SelectTrigger>
+                      <SelectContent position="item-aligned" className="max-h-72">
+                        <SelectItem value={CAPTION_PROMPT_NONE_VALUE}>None</SelectItem>
+                        {captionPrompts.map((p) => (
+                          <SelectItem key={p.id} value={String(p.id)}>
+                            {p.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="shrink-0"
+                    disabled={captionPromptsLoading}
+                    onClick={() => {
+                      setNewCaptionPromptError(null);
+                      setNewCaptionPromptFormKey((k) => k + 1);
+                      setNewCaptionPromptDialogOpen(true);
+                    }}
+                  >
+                    New
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
 
           <DialogFooter>
@@ -424,6 +554,31 @@ export const ItemContextMenu = memo(function ItemContextMenu({
               {captionAction === 'generate' ? 'Generate subtitles' : 'Regenerate subtitles'}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={newCaptionPromptDialogOpen}
+        onOpenChange={(open) => {
+          setNewCaptionPromptDialogOpen(open);
+          if (!open) {
+            setNewCaptionPromptError(null);
+          }
+        }}
+      >
+        <DialogContent className="flex max-h-[90dvh] min-h-0 w-[min(100vw-2rem,56rem)] max-w-none flex-col gap-4 overflow-hidden p-6 sm:max-w-4xl">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>New translation prompt</DialogTitle>
+          </DialogHeader>
+          <PromptForm
+            resetKey={newCaptionPromptFormKey}
+            error={newCaptionPromptError}
+            isSubmitting={creatingCaptionPrompt}
+            onCancel={() => setNewCaptionPromptDialogOpen(false)}
+            onSubmit={handleCreateCaptionPrompt}
+            nameInputId="caption-new-prompt-name"
+            promptInputId="caption-new-prompt-text"
+          />
         </DialogContent>
       </Dialog>
     </ContextMenu>

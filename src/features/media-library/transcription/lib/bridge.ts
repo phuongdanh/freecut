@@ -78,6 +78,7 @@ export class Bridge {
     language?: string,
     targetLanguage?: string,
     quantization?: QuantizationType,
+    translationPrompt?: string,
   ): Promise<void> {
     const { port1, port2 } = new MessageChannel();
     const modelId = MODEL_IDS[model];
@@ -102,6 +103,7 @@ export class Bridge {
       language,
       targetLanguage,
       quantization,
+      translationPrompt,
       authToken: getBearerToken(),
     });
 

@@ -50,6 +50,7 @@ let currentModelId: string | null = null;
 let port: MessagePort | null = null;
 let language: string | undefined;
 let targetLanguage: string | undefined;
+let translationPrompt: string | undefined;
 let pipelineReady = false;
 const queue: PCMChunk[] = [];
 let processing = false;
@@ -64,9 +65,11 @@ function getLanguageName(code: string): string {
 async function translateSegments({
   segments,
   targetLang,
+  prompt,
 }: {
   segments: { text: string; start: number; end: number }[];
   targetLang: string;
+  prompt?: string;
 }): Promise<{ text: string; start: number; end: number }[]> {
   try {
     const targetLanguageName = getLanguageName(targetLang);
@@ -78,11 +81,14 @@ async function translateSegments({
       selected: false,
     }));
 
-    const requestBody = {
+    const requestBody: Record<string, unknown> = {
       target_language_code: targetLang,
       target_language_name: targetLanguageName,
       text: JSON.stringify({ chunks }),
     };
+    if (prompt !== undefined && prompt.length > 0) {
+      requestBody.prompt = prompt;
+    }
 
     const apiUrl = toolsApiUrl('translate');
 
@@ -138,6 +144,7 @@ self.onmessage = async (event: MessageEvent) => {
   if (message.type === 'init') {
     language = message.language;
     targetLanguage = message.targetLanguage;
+    translationPrompt = message.translationPrompt;
     toolsAuthToken = message.authToken;
     await initPipeline(message.modelId, message.quantization ?? 'hybrid');
   }
@@ -338,6 +345,7 @@ async function transcribeChunk(chunk: PCMChunk): Promise<void> {
     segments = await translateSegments({
       segments,
       targetLang: targetLanguage,
+      prompt: translationPrompt,
     });
   }
 

@@ -121,7 +121,10 @@ class MediaTranscriptionService {
 
   async transcribeClipSegment(
     clip: CaptionableClip,
-    options: Pick<TranscribeOptions, 'language' | 'targetLanguage' | 'model' | 'quantization' | 'onProgress'> = {},
+    options: Pick<
+      TranscribeOptions,
+      'language' | 'targetLanguage' | 'translationPrompt' | 'model' | 'quantization' | 'onProgress'
+    > = {},
   ): Promise<MediaTranscript> {
     const mediaId = clip.mediaId;
     if (!mediaId) throw new Error(`Media ID is missing for clip: ${clip.id}`);
@@ -156,6 +159,7 @@ class MediaTranscriptionService {
       model,
       language,
       targetLanguage: options.targetLanguage,
+      translationPrompt: options.translationPrompt,
       quantization,
       onProgress: options.onProgress,
     });

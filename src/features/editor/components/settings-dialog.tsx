@@ -1,4 +1,4 @@
-﻿import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { MediaMetadata } from '@/types/storage';
 import {
   Dialog,
@@ -29,7 +29,18 @@ import {
 import { Switch } from '@/components/ui/switch';
 import { Slider } from '@/components/ui/slider';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { RotateCcw, Trash2, Loader2, Check, ImagePlus, Film } from 'lucide-react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { PromptForm, type PromptFormValues } from '@/components/common/prompt-form';
+import {
+  RotateCcw,
+  Trash2,
+  Loader2,
+  Check,
+  ImagePlus,
+  Film,
+  Pencil,
+  Plus,
+} from 'lucide-react';
 import {
   LocalInferenceUnloadControl,
   useSettingsStore,
@@ -58,8 +69,243 @@ import {
   WHISPER_QUANTIZATION_OPTIONS,
 } from '@/shared/utils/whisper-settings';
 import type { MediaTranscriptModel, MediaTranscriptQuantization } from '@/types/storage';
+import {
+  CAPTION_TRANSLATION_PROMPT_TYPE,
+  createPrompt,
+  deletePrompt,
+  listPrompts,
+  updatePrompt,
+  type PromptRecord,
+} from '@/services/prompt';
 
 const log = createLogger('SettingsDialog');
+
+interface PromptsSettingsPanelProps {
+  visible: boolean;
+}
+
+function PromptsSettingsPanel({ visible }: PromptsSettingsPanelProps) {
+  const [prompts, setPrompts] = useState<PromptRecord[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorMode, setEditorMode] = useState<'create' | 'edit'>('create');
+  const [editing, setEditing] = useState<PromptRecord | null>(null);
+  const [formKey, setFormKey] = useState(0);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<PromptRecord | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const loadPrompts = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
+    void listPrompts(CAPTION_TRANSLATION_PROMPT_TYPE)
+      .then((rows) => setPrompts(rows))
+      .catch((e: unknown) => {
+        setLoadError(e instanceof Error ? e.message : 'Failed to load prompts');
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    loadPrompts();
+  }, [visible, loadPrompts]);
+
+  const openCreate = () => {
+    setEditorMode('create');
+    setEditing(null);
+    setFormError(null);
+    setFormKey((k) => k + 1);
+    setEditorOpen(true);
+  };
+
+  const openEdit = (record: PromptRecord) => {
+    setEditorMode('edit');
+    setEditing(record);
+    setFormError(null);
+    setFormKey((k) => k + 1);
+    setEditorOpen(true);
+  };
+
+  const handleSavePrompt = async (values: PromptFormValues) => {
+    setSubmitting(true);
+    setFormError(null);
+    try {
+      if (editorMode === 'create') {
+        await createPrompt({
+          name: values.name,
+          type: CAPTION_TRANSLATION_PROMPT_TYPE,
+          prompt: values.prompt,
+        });
+      } else if (editing) {
+        await updatePrompt(editing.id, {
+          name: values.name,
+          type: CAPTION_TRANSLATION_PROMPT_TYPE,
+          prompt: values.prompt,
+        });
+      }
+      await loadPrompts();
+      setEditorOpen(false);
+      setEditing(null);
+    } catch (e: unknown) {
+      setFormError(e instanceof Error ? e.message : 'Failed to save prompt');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deletePrompt(deleteTarget.id);
+      await loadPrompts();
+      setDeleteTarget(null);
+    } catch (e: unknown) {
+      log.error('Failed to delete prompt', e);
+      setDeleteError(e instanceof Error ? e.message : 'Failed to delete prompt');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4 px-6 py-5 pr-7">
+      <div className="flex justify-end">
+        <Button type="button" size="sm" className="gap-1.5" onClick={openCreate}>
+          <Plus className="h-3.5 w-3.5" />
+          Add prompt
+        </Button>
+      </div>
+
+      {loadError && (
+        <p className="text-destructive text-sm">{loadError}</p>
+      )}
+
+      {loading && prompts.length === 0 && !loadError && (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading prompts…
+        </div>
+      )}
+
+      {!loading && prompts.length === 0 && !loadError && (
+        <p className="text-sm text-muted-foreground">No prompts yet. Add one to use in translated captions.</p>
+      )}
+
+      <div className="divide-y rounded-md border">
+        {prompts.map((p) => (
+          <div
+            key={p.id}
+            className="flex items-start gap-3 p-3"
+          >
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="truncate text-sm font-medium">{p.name}</p>
+              <p className="line-clamp-3 whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                {p.prompt}
+              </p>
+            </div>
+            <div className="flex shrink-0 gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => openEdit(p)}
+                aria-label={`Edit ${p.name}`}
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-destructive hover:text-destructive"
+                onClick={() => setDeleteTarget(p)}
+                aria-label={`Delete ${p.name}`}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Dialog open={editorOpen} onOpenChange={(o) => {
+        setEditorOpen(o);
+        if (!o) {
+          setFormError(null);
+          setEditing(null);
+        }
+      }}
+      >
+        <DialogContent className="flex max-h-[90dvh] min-h-0 w-[min(100vw-2rem,56rem)] max-w-none flex-col gap-4 overflow-hidden p-6 sm:max-w-4xl">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>
+              {editorMode === 'create' ? 'Add translation prompt' : 'Edit translation prompt'}
+            </DialogTitle>
+          </DialogHeader>
+          <PromptForm
+            resetKey={formKey}
+            defaultValues={
+              editing ? { name: editing.name, prompt: editing.prompt } : undefined
+            }
+            error={formError}
+            isSubmitting={submitting}
+            onCancel={() => setEditorOpen(false)}
+            onSubmit={handleSavePrompt}
+            submitLabel={editorMode === 'create' ? 'Create' : 'Save'}
+            nameInputId="settings-prompt-name"
+            promptInputId="settings-prompt-text"
+          />
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setDeleteTarget(null);
+            setDeleteError(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete prompt?</AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="text-sm text-muted-foreground">
+                {deleteTarget && (
+                  <p>
+                    This will permanently remove &ldquo;{deleteTarget.name}&rdquo;. This cannot be undone.
+                  </p>
+                )}
+                {deleteError && (
+                  <p className="mt-2 text-destructive">{deleteError}</p>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={deleting}
+              onClick={() => void handleConfirmDelete()}
+            >
+              {deleting ? 'Deleting…' : 'Delete'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
 
 interface SettingsDialogProps {
   open: boolean;
@@ -209,6 +455,13 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [regenState, setRegenState] = useState<'idle' | 'working' | 'done'>('idle');
   const [regenProgress, setRegenProgress] = useState('');
   const [proxyState, setProxyState] = useState<'idle' | 'clearing' | 'done'>('idle');
+  const [settingsTab, setSettingsTab] = useState('general');
+
+  useEffect(() => {
+    if (!open) {
+      setSettingsTab('general');
+    }
+  }, [open]);
 
   const handleClearCache = useCallback(async () => {
     setClearState('clearing');
@@ -260,16 +513,24 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg gap-0 overflow-hidden p-0">
-        <DialogHeader className="flex flex-row items-center justify-between border-b px-6 py-4 pr-14">
-          <DialogTitle>Editor Settings</DialogTitle>
-          <Button variant="ghost" size="sm" onClick={resetToDefaults} className="h-8 shrink-0 gap-1.5">
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reset
-          </Button>
-        </DialogHeader>
-        <ScrollArea className="max-h-[70vh]">
-          <div className="space-y-6 px-6 py-5 pr-7">
+      <DialogContent className="flex max-h-[85vh] max-w-3xl flex-col gap-0 overflow-hidden p-0">
+        <Tabs value={settingsTab} onValueChange={setSettingsTab} className="flex min-h-0 flex-1 flex-col">
+          <DialogHeader className="flex shrink-0 flex-col gap-3 border-b px-6 py-4 pr-14">
+            <div className="flex flex-row items-center justify-between gap-2">
+              <DialogTitle>Editor Settings</DialogTitle>
+              <Button variant="ghost" size="sm" onClick={resetToDefaults} className="h-8 shrink-0 gap-1.5">
+                <RotateCcw className="w-3.5 h-3.5" />
+                Reset
+              </Button>
+            </div>
+            <TabsList className="h-9 w-full justify-start sm:w-auto">
+              <TabsTrigger value="general">General</TabsTrigger>
+              <TabsTrigger value="prompts">Prompts</TabsTrigger>
+            </TabsList>
+          </DialogHeader>
+          <TabsContent value="general" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+            <ScrollArea className="h-[min(70vh,560px)]">
+              <div className="space-y-6 px-6 py-5 pr-7">
             {/* Interface */}
             <section className="space-y-3">
               <h3 className="text-sm font-medium text-muted-foreground">Interface</h3>
@@ -408,7 +669,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">
-                    Pick based on memory first. {defaultWhisperQuantizationOption.description}
+                    Pick based on memory first. {defaultWhisperQuantizationOption?.description ?? ''}
                   </p>
                 </div>
 
@@ -500,8 +761,15 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               </div>
             </section>
 
-          </div>
-        </ScrollArea>
+              </div>
+            </ScrollArea>
+          </TabsContent>
+          <TabsContent value="prompts" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
+            <ScrollArea className="h-[min(70vh,560px)]">
+              <PromptsSettingsPanel visible={open && settingsTab === 'prompts'} />
+            </ScrollArea>
+          </TabsContent>
+        </Tabs>
       </DialogContent>
 
       <AlertDialog open={showClearConfirm} onOpenChange={setShowClearConfirm}>

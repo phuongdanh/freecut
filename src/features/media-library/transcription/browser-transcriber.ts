@@ -120,6 +120,7 @@ export class TranscribeStream implements AsyncIterable<TranscriptSegment> {
         this.options.language,
         this.options.targetLanguage,
         this.options.quantization,
+        this.options.translationPrompt,
       );
     } catch (error) {
       this.error = error instanceof Error ? error : new Error(String(error));

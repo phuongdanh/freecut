@@ -23,6 +23,8 @@ export interface TranscribeOptions {
   model?: WhisperModel;
   language?: string;
   targetLanguage?: string;
+  /** Optional instruction text for server-side translate; omitted when unset. */
+  translationPrompt?: string;
   quantization?: QuantizationType;
   onSegment?: (segment: TranscriptSegment) => void;
   onProgress?: (event: TranscribeProgress) => void;
@@ -50,6 +52,7 @@ export type WhisperWorkerMessage =
       modelId: string;
       language?: string;
       targetLanguage?: string;
+      translationPrompt?: string;
       quantization?: QuantizationType;
       /** JWT for tools API (workers cannot read localStorage). */
       authToken?: string;

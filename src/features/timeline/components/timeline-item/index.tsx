@@ -1120,6 +1120,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
     options?: {
       language?: string;
       targetLanguage?: string;
+      translationPrompt?: string;
       forceTranscription?: boolean;
       replaceExisting?: boolean;
     },
@@ -1165,6 +1166,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
             model,
             language: options?.language,
             targetLanguage: options?.targetLanguage,
+            translationPrompt: options?.translationPrompt,
             onProgress: (progress) => {
               const mediaLibraryStore = useMediaLibraryStore.getState();
               mediaLibraryStore.setTranscriptProgress(mediaId, progress);
@@ -1235,6 +1237,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
   const handleGenerateCaptions = useCallback((model: MediaTranscriptModel, options?: {
     language?: string;
     targetLanguage?: string;
+    translationPrompt?: string;
   }) => {
     handleCaptionGeneration(model, options);
   }, [handleCaptionGeneration]);
@@ -1242,6 +1245,7 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
   const handleRegenerateCaptions = useCallback((model: MediaTranscriptModel, options?: {
     language?: string;
     targetLanguage?: string;
+    translationPrompt?: string;
   }) => {
     handleCaptionGeneration(model, {
       ...options,
