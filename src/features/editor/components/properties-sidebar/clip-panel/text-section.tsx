@@ -723,11 +723,18 @@ export function TextSection({
           {/* Text Content */}
           <PropertyRow label="Content">
             <Textarea
-              value={sharedValues.text ?? ''}
+              value={(sharedValues.text ?? '')}
               onChange={handleTextChange}
-              placeholder={sharedValues.text === undefined ? 'Mixed' : 'Enter text...'}
+              placeholder={
+                textItems.length > 1
+                  ? 'Multiple items selected'
+                  : sharedValues.text === undefined
+                    ? 'Mixed'
+                    : 'Enter text...'
+              }
               className="min-h-[60px] text-xs flex-1 min-w-0"
               rows={3}
+              disabled={textItems.length > 1}
             />
           </PropertyRow>
 
@@ -884,6 +891,29 @@ export function TextSection({
             onReset={() => handleColorChange('#ffffff')}
             defaultColor="#ffffff"
           />
+
+          {/* Background Color */}
+          <ColorPicker
+            label="Background"
+            color={bgHexForPicker}
+            onChange={handleBackgroundHexChange}
+            onLiveChange={handleBackgroundHexLiveChange}
+            onReset={() => handleBackgroundHexChange('#000000')}
+            defaultColor="#000000"
+          />
+
+          {/* Background Opacity */}
+          <PropertyRow label="BG Opacity">
+            <SliderInput
+              value={backgroundOpacityDisplay}
+              onChange={handleBackgroundOpacityChange}
+              onLiveChange={handleBackgroundOpacityLiveChange}
+              min={0}
+              max={100}
+              step={1}
+              unit="%"
+            />
+          </PropertyRow>
 
           {/* Letter Spacing */}
           <PropertyRow label="Spacing">

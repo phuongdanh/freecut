@@ -124,7 +124,6 @@ import type { MediaTranscriptModel } from '@/types/storage';
 import { WHISPER_MODEL_LABELS } from '@/shared/utils/whisper-settings';
 import { isLocalInferenceCancellationError } from '@/shared/state/local-inference';
 import { getTranscriptionOverallPercent } from '@/shared/utils/transcription-progress';
-import { getSameTrackSameTypeRangeIds } from '@/features/timeline/utils/item-selection-utils';
 import { getAudioFadePixels, getAudioFadeSecondsFromOffset, type AudioFadeHandle } from '../../utils/audio-fade';
 import { getAudioFadeCurveControlPoint, getAudioFadeCurveFromOffset, getAudioFadeCurvePath } from '../../utils/audio-fade-curve';
 import { getAudioVolumeDbFromDragDelta, getAudioVisualizationScale, getAudioVolumeLineY } from '../../utils/audio-volume';
@@ -1315,25 +1314,21 @@ export const TimelineItem = memo(function TimelineItem({ item, timelineDuration 
     }
 
     // Selection tool: handle item selection
-    const { selectedItemIds, selectItems } = useSelectionStore.getState();
+    const selectionStore = useSelectionStore.getState();
+    const { selectItems, setLastClickedItemId } = selectionStore;
+
+    if (e.shiftKey || e.metaKey || e.ctrlKey) {
+      // Range selection and toggle selection are handled on mouseDown in handleDragStart
+      return;
+    }
+
+    // Normal click: Reset selection to the current item
     const items = useTimelineStore.getState().items;
     const linkedSelectionEnabled = useEditorStore.getState().linkedSelectionEnabled;
     const targetIds = linkedSelectionEnabled ? getLinkedItemIds(items, item.id) : [item.id];
-    if (e.metaKey || e.ctrlKey) {
-      const isLinkedSelectionActive = targetIds.some((id) => selectedItemIds.includes(id));
-      if (isLinkedSelectionActive) {
-        const linkedIdSet = new Set(targetIds);
-        selectItems(selectedItemIds.filter((id) => !linkedIdSet.has(id)));
-      } else {
-        selectItems(linkedSelectionEnabled
-          ? expandSelectionWithLinkedItems(items, [...selectedItemIds, ...targetIds])
-          : Array.from(new Set([...selectedItemIds, ...targetIds])));
-      }
-    } else {
-      selectItems(targetIds);
-    }
+    selectItems(targetIds);
 
-    selectItems([item.id]);
+    setLastClickedItemId(item.id);
   }, [trackLocked, frameToPixels, pixelsToFrame, item.from, item.id, item.trackId, item.type]);
 
   // Double-click: open media in source monitor with clip's source range as I/O

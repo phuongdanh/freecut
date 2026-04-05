@@ -5,6 +5,7 @@ import type { DragState, UseTimelineDragReturn, SnapTarget } from '../types/drag
 import { useTimelineStore } from '../stores/timeline-store';
 import { useEditorStore } from '@/shared/state/editor';
 import { useSelectionStore } from '@/shared/state/selection';
+import { getSameTrackSameTypeRangeIds } from '../utils/item-selection-utils';
 import { useTimelineZoom } from './use-timeline-zoom';
 import { useSnapCalculator } from './use-snap-calculator';
 import { findNearestAvailableSpace } from '../utils/collision-utils';
@@ -561,27 +562,61 @@ export function useTimelineDrag(
       e.stopPropagation();
 
       // Check if this item is in current selection
-      const currentSelectedIds = selectedItemIdsRef.current;
-      const isInSelection = currentSelectedIds.includes(item.id);
-
       const allItems = getItems();
       const currentTracks = tracksRef.current;
       const linkedSelectionEnabled = useEditorStore.getState().linkedSelectionEnabled;
-
-      // If not in selection, select it (multi-select handled by TimelineItem's onClick)
+      const selectionStore = useSelectionStore.getState();
+      const { selectedItemIds: currentSelectedIds, lastClickedItemId, setLastClickedItemId } = selectionStore;
+      const isInSelection = currentSelectedIds.includes(item.id);
+      
       const linkedIds = linkedSelectionEnabled ? getLinkedItemIds(allItems, item.id) : [item.id];
-      if (!isInSelection) {
+
+      // Helper: determine if the clicked item is type-compatible with the current selection
+      const isSelectionCompatible = (ids: string[], newItem: TimelineItem) => {
+        if (ids.length === 0) return true;
+        const firstSelected = allItems.find(i => i.id === ids[0]);
+        return firstSelected && firstSelected.type === newItem.type;
+      };
+
+      if (e.shiftKey) {
+        const rangeIds = getSameTrackSameTypeRangeIds(allItems, lastClickedItemId || item.id, item.id);
+
+        if (rangeIds) {
+          const finalIds = linkedSelectionEnabled 
+            ? expandSelectionWithLinkedItems(allItems, rangeIds)
+            : Array.from(new Set(rangeIds));
+          selectItems(finalIds);
+        } else if (!isInSelection) {
+          selectItems(linkedIds);
+        }
+      } else if (e.metaKey || e.ctrlKey) {
+        // Toggle selection on Cmd/Ctrl click: handle both add and remove here
+        // to avoid conflict with the subsequent onClick event.
+        if (isInSelection) {
+          // Deselect if already selected
+          const targetIdSet = new Set(linkedIds);
+          selectItems(currentSelectedIds.filter((id) => !targetIdSet.has(id)));
+        } else {
+          // Add if not selected (and same type)
+          if (isSelectionCompatible(currentSelectedIds, item)) {
+            selectItems(linkedSelectionEnabled
+              ? expandSelectionWithLinkedItems(allItems, [...currentSelectedIds, ...linkedIds])
+              : Array.from(new Set([...currentSelectedIds, ...linkedIds])));
+          } else {
+            // Different type: reset selection to new item
+            selectItems(linkedIds);
+          }
+        }
+      } else if (!isInSelection) {
+        // Normal click, not in selection: reset selection
         selectItems(linkedIds);
       }
+      
+      setLastClickedItemId(item.id);
 
-      // Determine which items to drag
-      const itemsToDrag = isInSelection
-        ? (linkedSelectionEnabled ? expandSelectionWithLinkedItems(allItems, currentSelectedIds) : currentSelectedIds)
-        : linkedIds;
-      const draggableItemIds = filterUnlockedItemIds(allItems, currentTracks, itemsToDrag);
-      if (isInSelection && itemsToDrag.length !== currentSelectedIds.length) {
-        selectItems(itemsToDrag);
-      }
+      // Determine which items to drag (after selection has been updated above)
+      const nextSelection = useSelectionStore.getState().selectedItemIds;
+      const draggableItemIds = filterUnlockedItemIds(allItems, currentTracks, nextSelection);
 
       // Store initial state for all dragged items
       const draggedItems = draggableItemIds

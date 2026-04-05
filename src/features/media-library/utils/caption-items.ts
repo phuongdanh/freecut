@@ -292,7 +292,7 @@ export function buildCaptionTrack(
   sourceTrackId: string,
 ): TimelineTrack {
   return {
-    id: `track-captions-${Date.now()}`,
+    id: `track-captions-${crypto.randomUUID()}`,
     name: 'Captions',
     height: DEFAULT_TRACK_HEIGHT,
     locked: false,

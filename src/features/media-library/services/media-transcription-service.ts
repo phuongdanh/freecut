@@ -279,18 +279,16 @@ class MediaTranscriptionService {
 
     const tracksChanged = newTracks.length !== timeline.tracks.length
       || newTracks.some((track, index) => track.id !== timeline.tracks[index]?.id);
-    if (tracksChanged) {
-      timeline.setTracks(newTracks);
+
+    const removeIds = [...generatedCaptionIdsToRemove];
+
+    if (tracksChanged || insertedItems.length > 0 || removeIds.length > 0) {
+      timeline.addItemsWithTrackChanges(newTracks, insertedItems, removeIds);
+      if (insertedItems.length > 0) {
+        useSelectionStore.getState().selectItems(insertedItems.map((item) => item.id));
+      }
     }
 
-    if (generatedCaptionIdsToRemove.size > 0) {
-      timeline.removeItems([...generatedCaptionIdsToRemove]);
-    }
-
-    if (insertedItems.length > 0) {
-      timeline.addItems(insertedItems);
-      useSelectionStore.getState().selectItems(insertedItems.map((item) => item.id));
-    }
 
     return {
       insertedItemCount: insertedItems.length,

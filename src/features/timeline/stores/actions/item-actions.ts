@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Item Actions - Cross-domain operations that affect items, transitions, and keyframes.
  */
 
@@ -311,6 +311,38 @@ export function addItems(items: TimelineItem[]): void {
     useTimelineSettingsStore.getState().markDirty();
   }, { count: placedItems.length });
 }
+
+/**
+ * Atomically update tracks and items together.
+ * Supports adding new items, removing existing ones, and setting the full track list.
+ */
+export function addItemsWithTrackChanges(
+  tracks: TimelineTrack[],
+  itemsToAdd: TimelineItem[],
+  removeIds: string[] = [],
+): void {
+  const placedItems = placeItemsWithoutTimelineOverlap(itemsToAdd);
+
+  execute('ADD_ITEMS_WITH_TRACKS', () => {
+    const store = useItemsStore.getState();
+    store.setTracks(tracks);
+
+    if (removeIds.length > 0) {
+      store._removeItems(removeIds);
+    }
+
+    if (placedItems.length > 0) {
+      store._addItems(placedItems);
+    }
+
+    useTimelineSettingsStore.getState().markDirty();
+  }, {
+    trackCount: tracks.length,
+    insertedCount: placedItems.length,
+    removedCount: removeIds.length,
+  });
+}
+
 
 export function updateItem(id: string, updates: Partial<TimelineItem>): void {
   execute('UPDATE_ITEM', () => {

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Timeline Store Facade
  *
  * Provides backward-compatible access to the split timeline stores.
@@ -988,6 +988,7 @@ function getSnapshot(): TimelineState & TimelineActions {
       setTracks: timelineActions.setTracks,
       addItem: timelineActions.addItem,
       addItems: timelineActions.addItems,
+      addItemsWithTrackChanges: timelineActions.addItemsWithTrackChanges,
       updateItem: timelineActions.updateItem,
       removeItems: timelineActions.removeItems,
       rippleDeleteItems: timelineActions.rippleDeleteItems,

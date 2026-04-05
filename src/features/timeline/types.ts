@@ -40,6 +40,11 @@ export interface TimelineActions {
   setTracks: (tracks: TimelineTrack[]) => void;
   addItem: (item: TimelineItem) => void;
   addItems: (items: TimelineItem[]) => void;
+  addItemsWithTrackChanges: (
+    tracks: TimelineTrack[],
+    itemsToAdd: TimelineItem[],
+    removeIds?: string[]
+  ) => void;
   updateItem: (id: string, updates: Partial<TimelineItem>) => void;
   removeItems: (ids: string[]) => void;
   rippleDeleteItems: (ids: string[]) => void;

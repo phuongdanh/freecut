@@ -59,7 +59,6 @@ import {
 } from '@/features/editor/deps/timeline-cache';
 import { clearPreviewAudioCache } from '@/features/editor/deps/composition-runtime';
 import { createLogger } from '@/shared/logging/logger';
-import { cn } from '@/shared/ui/cn';
 import { EDITOR_DENSITY_OPTIONS } from '@/shared/ui/editor-layout';
 import {
   getWhisperQuantizationOption,

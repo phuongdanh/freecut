@@ -47,8 +47,6 @@ import type { TimelineTrack as TimelineTrackType } from '@/types/timeline';
 import { useMarkersStore } from '../stores/markers-store';
 import { useTransitionsStore } from '../stores/transitions-store';
 import { getFilteredItemSnapEdges } from '../utils/timeline-snap-utils';
-import { filterIdsToLargestHomogeneousGroup } from '../utils/item-selection-utils';
-import type { TimelineItem } from '@/types/timeline';
 import { expandSelectionWithLinkedItems } from '../utils/linked-items';
 import { getTimelineWidth, getZoomToFitLevel } from '../utils/timeline-layout';
 
@@ -165,6 +163,8 @@ export const TimelineContent = memo(function TimelineContent({
   // Granular selectors for drag state - avoid subscribing to entire dragState object
   const isDragging = useSelectionStore((s) => !!s.dragState?.isDragging);
   const activeSnapTarget = useSelectionStore((s) => s.dragState?.activeSnapTarget ?? null);
+
+  const scrollLeft = useTimelineViewportStore((s) => s.scrollLeft);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const tracksContainerRef = useRef<HTMLDivElement>(null);
@@ -952,19 +952,20 @@ export const TimelineContent = memo(function TimelineContent({
       velocityZoomRef.current = 0;
       const smoothingFactor = 1 - SCROLL_SMOOTHING;
 
-      // Shift + scroll = vertical scroll ONLY
+      // Shift + scroll = horizontal scroll ONLY
       if (event.shiftKey) {
-        verticalScrollTargetRef.current = getVerticalScrollTarget(event.target);
-        velocityXRef.current = 0;
-        const delta = (event.deltaX || event.deltaY) * SCROLL_SENSITIVITY;
-        velocityYRef.current = velocityYRef.current * smoothingFactor + delta * SCROLL_SMOOTHING;
-      } else {
         verticalScrollTargetRef.current = null;
-        // Default scroll = horizontal scroll ONLY
         velocityYRef.current = 0;
         const delta = (event.deltaY || event.deltaX) * SCROLL_SENSITIVITY;
         velocityXRef.current = velocityXRef.current * smoothingFactor + delta * SCROLL_SMOOTHING;
+      } else {
+        // Default scroll = vertical scroll ONLY
+        verticalScrollTargetRef.current = getVerticalScrollTarget(event.target);
+        velocityXRef.current = 0;
+        const delta = (event.deltaY || event.deltaX) * SCROLL_SENSITIVITY;
+        velocityYRef.current = velocityYRef.current * smoothingFactor + delta * SCROLL_SMOOTHING;
       }
+
 
       startMomentumScroll();
     };
@@ -997,10 +998,18 @@ export const TimelineContent = memo(function TimelineContent({
     <div
       ref={options.scrollRef}
       data-track-section-scroll={options.section}
-      className="min-h-0 overflow-y-auto overflow-x-hidden"
+      className="relative flex-shrink-0 min-h-0 overflow-y-auto overflow-x-hidden focus:outline-none"
       style={{ height: `${options.height}px` }}
     >
-      <div className="relative min-h-full">
+
+      <div
+        className="relative min-h-full"
+        style={{
+          width: `${timelineWidth}px`,
+          transform: `translateX(${-scrollLeft}px)`,
+          willChange: 'transform',
+        }}
+      >
         {options.section === 'video' && options.anchorTrackId && (
           <TimelineMediaDropZone
             height={options.zoneHeight}
@@ -1033,6 +1042,8 @@ export const TimelineContent = memo(function TimelineContent({
         )}
       </div>
     </div>
+
+
   );
 
   return (
@@ -1059,9 +1070,8 @@ export const TimelineContent = memo(function TimelineContent({
 
       <div
         ref={tracksContainerRef}
-        className="relative timeline-tracks flex flex-1 min-h-0 flex-col"
+        className="sticky left-0 w-full timeline-tracks flex flex-1 min-h-0 flex-col"
         style={{
-          width: `${timelineWidth}px`,
           contain: 'layout style paint',
           willChange: 'contents',
         }}
@@ -1097,15 +1107,23 @@ export const TimelineContent = memo(function TimelineContent({
           })
         )}
 
-        {isDragging && (
-          <TimelineGuidelines
-            activeSnapTarget={activeSnapTarget}
-          />
-        )}
+        {/* Global timeline overlays - transformed to follow horizontal scroll */}
+        <div
+          className="absolute inset-0 pointer-events-none overflow-hidden"
+          style={{ width: `${timelineWidth}px`, transform: `translateX(${-scrollLeft}px)` }}
+        >
+          {isDragging && (
+            <TimelineGuidelines
+              activeSnapTarget={activeSnapTarget}
+            />
+          )}
 
-        <TimelinePreviewScrubber maxFrame={maxTimelineFrame} />
-        <TimelinePlayhead maxFrame={maxTimelineFrame} />
+          <TimelinePreviewScrubber maxFrame={maxTimelineFrame} />
+          <TimelinePlayhead maxFrame={maxTimelineFrame} />
+        </div>
       </div>
+
+
     </div>
   );
 });
