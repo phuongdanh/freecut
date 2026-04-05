@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { MediaMetadata } from '@/types/storage';
-import { buildDroppedMediaTimelineItem, getDroppedMediaDurationInFrames } from './dropped-media';
+import {
+  buildDroppedMediaTimelineItem,
+  buildDroppedMediaTimelineItems,
+  getDroppedMediaDurationInFrames,
+} from './dropped-media';
 
 function makeMedia(overrides: Partial<MediaMetadata> = {}): MediaMetadata {
   return {
@@ -67,5 +71,40 @@ describe('buildDroppedMediaTimelineItem', () => {
       height: 1080,
       rotation: 0,
     });
+  });
+
+  it('builds linked video and audio items that stay in sync', () => {
+    const media = makeMedia({ audioCodec: 'aac' });
+    const [videoItem, audioItem] = buildDroppedMediaTimelineItems({
+      media,
+      mediaId: media.id,
+      mediaType: 'video',
+      label: media.fileName,
+      timelineFps: 30,
+      blobUrl: 'blob:test',
+      thumbnailUrl: 'blob:thumb',
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      linkVideoAudio: true,
+      placement: {
+        primary: {
+          trackId: 'video-track',
+          from: 48,
+          durationInFrames: 120,
+        },
+        linkedAudio: {
+          trackId: 'audio-track',
+          from: 48,
+          durationInFrames: 120,
+        },
+      },
+    });
+
+    expect(videoItem?.type).toBe('video');
+    expect(audioItem?.type).toBe('audio');
+    expect(videoItem?.from).toBe(audioItem?.from);
+    expect(videoItem?.durationInFrames).toBe(audioItem?.durationInFrames);
+    expect(videoItem?.originId).toBe(audioItem?.originId);
+    expect(videoItem?.linkedGroupId).toBe(audioItem?.linkedGroupId);
   });
 });

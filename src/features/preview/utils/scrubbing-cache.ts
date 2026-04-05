@@ -11,6 +11,12 @@
  * When all tiers are warm, scrubbing doesn't decode at all.
  */
 
+import {
+  hasFrameInvalidation,
+  isFrameInRanges,
+  type FrameInvalidationRequest,
+} from '@/shared/utils/frame-invalidation';
+
 // ---------------------------------------------------------------------------
 // Tier 1 — VRAM GPU Texture Cache
 // ---------------------------------------------------------------------------
@@ -20,15 +26,26 @@ interface GpuCacheEntry {
   view: GPUTextureView;
 }
 
+/** Eviction hint: prefer evicting frames in the opposite scrub direction */
+interface EvictionHint {
+  currentFrame: number;
+  direction: -1 | 0 | 1;
+}
+
 class GpuTextureCache {
   private cache = new Map<number, GpuCacheEntry>();
   private maxFrames: number;
   private device: GPUDevice | null = null;
   private texW = 0;
   private texH = 0;
+  private hint: EvictionHint | null = null;
 
   constructor(maxFrames: number) {
     this.maxFrames = maxFrames;
+  }
+
+  setEvictionHint(hint: EvictionHint): void {
+    this.hint = hint;
   }
 
   setDevice(device: GPUDevice, width: number, height: number): void {
@@ -66,13 +83,13 @@ class GpuTextureCache {
       return this.cache.get(frame)!;
     }
 
-    // Evict LRU if full
+    // Evict if full — prefer frames in the opposite scrub direction
     if (this.cache.size >= this.maxFrames) {
-      const oldest = this.cache.keys().next().value;
-      if (oldest !== undefined) {
-        const old = this.cache.get(oldest);
+      const victim = this.pickEvictionVictim();
+      if (victim !== undefined) {
+        const old = this.cache.get(victim);
         old?.texture.destroy();
-        this.cache.delete(oldest);
+        this.cache.delete(victim);
       }
     }
 
@@ -96,12 +113,40 @@ class GpuTextureCache {
     }
   }
 
+  /**
+   * Pick the best frame to evict. When scrub direction is known, prefer
+   * the oldest frame in the OPPOSITE direction (behind when scrubbing
+   * forward, ahead when scrubbing backward). Falls back to pure LRU.
+   */
+  private pickEvictionVictim(): number | undefined {
+    if (!this.hint || this.hint.direction === 0) {
+      return this.cache.keys().next().value;
+    }
+    const { currentFrame, direction } = this.hint;
+    // Scan oldest-first; pick the first frame in the opposite direction
+    for (const frame of this.cache.keys()) {
+      if (direction > 0 ? frame < currentFrame : frame > currentFrame) {
+        return frame;
+      }
+    }
+    // All frames are in the same direction — fall back to LRU
+    return this.cache.keys().next().value;
+  }
+
   has(frame: number): boolean {
     return this.cache.has(frame);
   }
 
   get size(): number {
     return this.cache.size;
+  }
+
+  deleteMatching(predicate: (frame: number) => boolean): void {
+    for (const [frame, entry] of this.cache.entries()) {
+      if (!predicate(frame)) continue;
+      entry.texture.destroy();
+      this.cache.delete(frame);
+    }
   }
 
   clear(): void {
@@ -162,10 +207,15 @@ class RamPreviewCache {
   private maxBytes: number;
   private currentBytes = 0;
   private bytesPerFrame = 0;
+  private hint: EvictionHint | null = null;
 
   constructor(maxFrames: number, maxBytes: number) {
     this.maxFrames = maxFrames;
     this.maxBytes = maxBytes;
+  }
+
+  setEvictionHint(hint: EvictionHint): void {
+    this.hint = hint;
   }
 
   setDimensions(width: number, height: number): void {
@@ -187,21 +237,34 @@ class RamPreviewCache {
       return;
     }
 
-    // Evict until within both limits
+    // Evict until within both limits — prefer frames in opposite scrub direction
     while (
       (this.cache.size >= this.maxFrames || this.currentBytes + this.bytesPerFrame > this.maxBytes) &&
       this.cache.size > 0
     ) {
-      const oldest = this.cache.keys().next().value;
-      if (oldest === undefined) break;
-      const old = this.cache.get(oldest)!;
+      const victim = this.pickEvictionVictim();
+      if (victim === undefined) break;
+      const old = this.cache.get(victim)!;
       old.close();
-      this.cache.delete(oldest);
+      this.cache.delete(victim);
       this.currentBytes -= this.bytesPerFrame;
     }
 
     this.cache.set(frame, bitmap);
     this.currentBytes += this.bytesPerFrame;
+  }
+
+  private pickEvictionVictim(): number | undefined {
+    if (!this.hint || this.hint.direction === 0) {
+      return this.cache.keys().next().value;
+    }
+    const { currentFrame, direction } = this.hint;
+    for (const frame of this.cache.keys()) {
+      if (direction > 0 ? frame < currentFrame : frame > currentFrame) {
+        return frame;
+      }
+    }
+    return this.cache.keys().next().value;
   }
 
   has(frame: number): boolean {
@@ -210,6 +273,16 @@ class RamPreviewCache {
 
   get size(): number {
     return this.cache.size;
+  }
+
+  deleteMatching(predicate: (frame: number) => boolean): void {
+    for (const [frame, bitmap] of this.cache.entries()) {
+      if (!predicate(frame)) continue;
+      bitmap.close();
+      this.cache.delete(frame);
+      this.currentBytes -= this.bytesPerFrame;
+    }
+    this.currentBytes = Math.max(0, this.currentBytes);
   }
 
   clear(): void {
@@ -288,6 +361,22 @@ export class ScrubbingCache {
       this.blitCanvas = null;
       this.blitCtx = null;
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Eviction hints
+  // -----------------------------------------------------------------------
+
+  /**
+   * Update the scrub direction hint used for cache eviction.
+   * When direction is known, eviction prefers frames in the opposite
+   * direction — preserving frames the user is scrubbing toward.
+   * Call on every scrub position change (cheap, just stores two numbers).
+   */
+  setEvictionHint(currentFrame: number, direction: -1 | 0 | 1): void {
+    const hint: EvictionHint = { currentFrame, direction };
+    this.tier1.setEvictionHint(hint);
+    this.tier3.setEvictionHint(hint);
   }
 
   // -----------------------------------------------------------------------
@@ -387,16 +476,22 @@ export class ScrubbingCache {
    * Cache a fully composited frame into Tier 1 + Tier 3.
    * Call after renderFrame() completes.
    *
-   * Tier 1 (GPU) is populated synchronously from the canvas via
-   * copyExternalImageToTexture — no bitmap creation needed (<1ms).
-   * Tier 3 (RAM) uses async createImageBitmap in the background.
-   * The source canvas is NOT modified — safe for display canvases.
+   * Tier 1 (GPU) is always populated via copyExternalImageToTexture
+   * (near-free: <0.5ms CPU, GPU handles the copy asynchronously).
+   * Tier 3 (RAM) uses createImageBitmap (~2-5ms) and can be skipped
+   * during sequential forward playback where mediabunny decode is cheaper.
+   *
+   * @param gpuOnly - When true, only populate Tier 1 (GPU). Use during
+   *   sequential forward playback to avoid createImageBitmap overhead
+   *   while still building GPU cache for backward scrub coverage.
    */
-  cacheFrame(frame: number, canvas: OffscreenCanvas): void {
-    // Tier 1: GPU upload directly from canvas (synchronous, no bitmap copy)
+  cacheFrame(frame: number, canvas: OffscreenCanvas, gpuOnly = false): void {
+    // Tier 1: GPU upload directly from canvas (near-free)
     if (!this.tier1.has(frame)) {
       this.tier1.put(frame, canvas);
     }
+
+    if (gpuOnly) return;
 
     // Tier 3: RAM buffer (async bitmap creation in background)
     if (!this.tier3.has(frame)) {
@@ -417,16 +512,23 @@ export class ScrubbingCache {
   // Invalidation
   // -----------------------------------------------------------------------
 
-  /** Evict specific frames or flush all tiers. */
-  invalidate(frames?: number[]): void {
-    if (!frames) {
+  /** Evict specific cached frames, cached frame ranges, or flush all tiers. */
+  invalidate(request?: FrameInvalidationRequest): void {
+    if (!request || !hasFrameInvalidation(request)) {
       this.tier1.clear();
       this.tier3.clear();
       return;
     }
-    // Selective invalidation is expensive for GPU textures — flush all tiers
-    this.tier1.clear();
-    this.tier3.clear();
+
+    const explicitFrames = request.frames ? new Set(request.frames) : null;
+    const ranges = request.ranges ?? [];
+    const shouldDeleteFrame = (frame: number) => (
+      (explicitFrames?.has(frame) ?? false)
+      || isFrameInRanges(frame, ranges)
+    );
+
+    this.tier1.deleteMatching(shouldDeleteFrame);
+    this.tier3.deleteMatching(shouldDeleteFrame);
   }
 
   /** Clear Tier 2 (per-video last-frame). Call when timeline items change. */

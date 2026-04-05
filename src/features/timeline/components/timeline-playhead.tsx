@@ -120,6 +120,7 @@ export function TimelinePlayhead({ inRuler = false, maxFrame }: TimelinePlayhead
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    usePlaybackStore.getState().setPreviewFrame(null);
     const container = inRuler
       ? playheadRef.current?.closest('.timeline-ruler')
       : playheadRef.current?.closest('.timeline-tracks');
@@ -252,7 +253,7 @@ export function TimelinePlayhead({ inRuler = false, maxFrame }: TimelinePlayhead
               width: '20px',
               height: '20px',
               transform: 'translateX(-50%)',
-              cursor: activeToolRef.current === 'razor' ? 'default' : isDragging ? 'grabbing' : 'grab',
+              cursor: activeToolRef.current === 'razor' ? 'default' : isDragging ? 'grabbing' : 'default',
               // Pass through pointer events in razor mode or during external drag operations
               pointerEvents: activeToolRef.current === 'razor' || isExternalDrag ? 'none' : 'auto',
               backgroundColor: 'transparent',

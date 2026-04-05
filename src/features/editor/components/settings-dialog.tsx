@@ -59,6 +59,7 @@ import {
 } from '@/features/editor/deps/timeline-cache';
 import { clearPreviewAudioCache } from '@/features/editor/deps/composition-runtime';
 import { createLogger } from '@/shared/logging/logger';
+import { cn } from '@/shared/ui/cn';
 import { EDITOR_DENSITY_OPTIONS } from '@/shared/ui/editor-layout';
 import {
   getWhisperQuantizationOption,
@@ -306,7 +307,6 @@ function PromptsSettingsPanel({ visible }: PromptsSettingsPanelProps) {
     </div>
   );
 }
-
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -437,6 +437,7 @@ async function regenerateProjectThumbnails(
 }
 
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
+  const snapEnabled = useSettingsStore((s) => s.snapEnabled);
   const editorDensity = useSettingsStore((s) => s.editorDensity);
   const showWaveforms = useSettingsStore((s) => s.showWaveforms);
   const showFilmstrips = useSettingsStore((s) => s.showFilmstrips);
@@ -528,242 +529,251 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
               <TabsTrigger value="prompts">Prompts</TabsTrigger>
             </TabsList>
           </DialogHeader>
+
           <TabsContent value="general" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <ScrollArea className="h-[min(70vh,560px)]">
-              <div className="space-y-6 px-6 py-5 pr-7">
-            {/* Interface */}
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">Interface</h3>
-              <div className="space-y-1.5">
-                <Label className="text-sm">Editor Density</Label>
-                <Select
-                  value={editorDensity}
-                  onValueChange={(value) => setSetting('editorDensity', value as typeof editorDensity)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {EDITOR_DENSITY_OPTIONS.map((option) => (
-                      <SelectItem key={option.value} value={option.value}>
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  Compact fits more of the editor into a 1080p screen. Default restores the roomier layout.
-                </p>
-              </div>
-            </section>
+              <div className="space-y-8 px-6 py-5 pr-7">
+                {/* Interface Section */}
+                <section className="space-y-4">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70">Interface</h3>
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">Editor Density</Label>
+                      <Select
+                        value={editorDensity}
+                        onValueChange={(value) => setSetting('editorDensity', value as typeof editorDensity)}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {EDITOR_DENSITY_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Compact fits more of the editor into a 1080p screen. Default restores the roomier layout.
+                      </p>
+                    </div>
 
-            {/* General */}
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">General</h3>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label className="text-sm">Auto-save</Label>
-                  <Switch
-                    checked={autoSaveInterval > 0}
-                    onCheckedChange={(v) => setSetting('autoSaveInterval', v ? 5 : 0)}
-                  />
-                </div>
-                {autoSaveInterval > 0 && (
-                  <div className="flex items-center justify-between">
-                    <Label className="text-sm text-muted-foreground">Interval</Label>
-                    <div className="w-32 flex items-center gap-2">
-                      <Slider
-                        value={[autoSaveInterval]}
-                        onValueChange={([v]) => setSetting('autoSaveInterval', v || 5)}
-                        min={5}
-                        max={30}
-                        step={5}
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">Auto-save</Label>
+                        <p className="text-xs text-muted-foreground">Automatically save your project changes.</p>
+                      </div>
+                      <Switch
+                        checked={autoSaveInterval > 0}
+                        onCheckedChange={(v) => setSetting('autoSaveInterval', v ? 5 : 0)}
                       />
-                      <span className="text-xs text-muted-foreground w-6">{autoSaveInterval}m</span>
+                    </div>
+
+                    {autoSaveInterval > 0 && (
+                      <div className="flex items-center justify-between gap-4 pl-4 border-l-2 border-muted">
+                        <Label className="text-sm text-muted-foreground">Interval (minutes)</Label>
+                        <div className="w-40 flex items-center gap-3">
+                          <Slider
+                            value={[autoSaveInterval]}
+                            onValueChange={([v]) => setSetting('autoSaveInterval', v || 5)}
+                            min={5}
+                            max={30}
+                            step={5}
+                          />
+                          <span className="text-xs font-mono text-muted-foreground w-6">{autoSaveInterval}</span>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">Undo History Depth</Label>
+                        <p className="text-xs text-muted-foreground">Number of steps to keep in undo history.</p>
+                      </div>
+                      <div className="w-40 flex items-center gap-3">
+                        <Slider
+                          value={[maxUndoHistory]}
+                          onValueChange={([v]) => setSetting('maxUndoHistory', v || 10)}
+                          min={10}
+                          max={200}
+                          step={10}
+                        />
+                        <span className="text-xs font-mono text-muted-foreground w-6">{maxUndoHistory}</span>
+                      </div>
                     </div>
                   </div>
-                )}
-              </div>
-            </section>
+                </section>
 
-            {/* Timeline */}
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">Timeline</h3>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label className="text-sm">Show Waveforms</Label>
-                  <Switch checked={showWaveforms} onCheckedChange={(v) => setSetting('showWaveforms', v)} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <Label className="text-sm">Show Filmstrips</Label>
-                  <Switch checked={showFilmstrips} onCheckedChange={(v) => setSetting('showFilmstrips', v)} />
-                </div>
-              </div>
-            </section>
-
-            {/* Performance */}
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">Performance</h3>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label className="text-sm">Undo History Depth</Label>
-                  <div className="w-32 flex items-center gap-2">
-                    <Slider
-                      value={[maxUndoHistory]}
-                      onValueChange={([v]) => setSetting('maxUndoHistory', v || 10)}
-                      min={10}
-                      max={200}
-                      step={10}
-                    />
-                    <span className="text-xs text-muted-foreground w-6">{maxUndoHistory}</span>
+                {/* Timeline Section */}
+                <section className="space-y-4">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70">Timeline</h3>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">Snap by Default</Label>
+                        <p className="text-xs text-muted-foreground">Sets the initial snap state when a project opens.</p>
+                      </div>
+                      <Switch checked={snapEnabled} onCheckedChange={(v) => setSetting('snapEnabled', v)} />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm font-medium">Show Waveforms</Label>
+                      <Switch checked={showWaveforms} onCheckedChange={(v) => setSetting('showWaveforms', v)} />
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <Label className="text-sm font-medium">Show Filmstrips</Label>
+                      <Switch checked={showFilmstrips} onCheckedChange={(v) => setSetting('showFilmstrips', v)} />
+                    </div>
                   </div>
-                </div>
-              </div>
-            </section>
+                </section>
 
-            {/* Whisper */}            
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">Whisper</h3>
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <Label className="text-sm">Default Model</Label>
-                  <Select
-                    value={defaultWhisperModel}
-                    onValueChange={(value) =>
-                      setSetting('defaultWhisperModel', value as MediaTranscriptModel)
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {WHISPER_MODEL_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Used when transcription starts without an explicit model override.
-                  </p>
-                </div>
+                {/* Whisper Section */}
+                <section className="space-y-4">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70">Whisper (AI Transcription)</h3>
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">Default Model</Label>
+                      <Select
+                        value={defaultWhisperModel}
+                        onValueChange={(value) =>
+                          setSetting('defaultWhisperModel', value as MediaTranscriptModel)
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {WHISPER_MODEL_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Used when transcription starts without an explicit model override.
+                      </p>
+                    </div>
 
-                <div className="space-y-1.5">
-                  <Label className="text-sm">Default Quantization</Label>
-                  <Select
-                    value={defaultWhisperQuantization}
-                    onValueChange={(value) =>
-                      setSetting('defaultWhisperQuantization', value as MediaTranscriptQuantization)
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {WHISPER_QUANTIZATION_OPTIONS.map((option) => (
-                        <SelectItem key={option.value} value={option.value}>
-                          {option.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Pick based on memory first. {defaultWhisperQuantizationOption?.description ?? ''}
-                  </p>
-                </div>
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">Default Quantization</Label>
+                      <Select
+                        value={defaultWhisperQuantization}
+                        onValueChange={(value) =>
+                          setSetting('defaultWhisperQuantization', value as MediaTranscriptQuantization)
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {WHISPER_QUANTIZATION_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Pick based on memory first. {defaultWhisperQuantizationOption?.description}
+                      </p>
+                    </div>
 
-                <div className="space-y-1.5">
-                  <Label className="text-sm">Default Language</Label>
-                  <Combobox
-                    value={defaultWhisperLanguageValue}
-                    onValueChange={(value) =>
-                      setSetting('defaultWhisperLanguage', getWhisperLanguageSettingValue(value))
-                    }
-                    options={WHISPER_LANGUAGE_OPTIONS}
-                    placeholder="Auto-detect"
-                    searchPlaceholder="Search languages..."
-                    emptyMessage="No languages match that search."
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Choose Auto-detect to infer the language, or lock transcription to a known language for faster startup.
-                  </p>
-                </div>
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">Default Language</Label>
+                      <Combobox
+                        value={defaultWhisperLanguageValue}
+                        onValueChange={(value) =>
+                          setSetting('defaultWhisperLanguage', getWhisperLanguageSettingValue(value))
+                        }
+                        options={WHISPER_LANGUAGE_OPTIONS}
+                        placeholder="Auto-detect"
+                        searchPlaceholder="Search languages..."
+                        emptyMessage="No languages match that search."
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Choose Auto-detect to infer the language, or lock transcription to a known language for faster startup.
+                      </p>
+                    </div>
 
-                <LocalInferenceUnloadControl />
-              </div>
-            </section>
-
-            {/* Storage */}
-            <section className="space-y-3">
-              <h3 className="text-sm font-medium text-muted-foreground">Storage</h3>
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label className="text-sm">Clear Project Cache</Label>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Waveforms, filmstrips, GIF frames, decoded audio
-                    </p>
+                    <div className="pt-2">
+                      <LocalInferenceUnloadControl />
+                    </div>
                   </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 w-28 gap-1.5"
-                    onClick={() => setShowClearConfirm(true)}
-                    disabled={clearState !== 'idle'}
-                  >
-                    {clearState === 'clearing' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    {clearState === 'done' && <Check className="w-3.5 h-3.5" />}
-                    {clearState === 'idle' && <Trash2 className="w-3.5 h-3.5" />}
-                    {clearState === 'clearing' ? 'Clearing...' : clearState === 'done' ? 'Cleared' : 'Clear'}
-                  </Button>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label className="text-sm">Regenerate Thumbnails</Label>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Re-create media library thumbnails for this project
-                    </p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 w-28 gap-1.5"
-                    onClick={handleRegenThumbnails}
-                    disabled={regenState !== 'idle'}
-                  >
-                    {regenState === 'working' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    {regenState === 'done' && <Check className="w-3.5 h-3.5" />}
-                    {regenState === 'idle' && <ImagePlus className="w-3.5 h-3.5" />}
-                    {regenState === 'working' ? regenProgress : regenState === 'done' ? 'Done' : 'Regenerate'}
-                  </Button>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <Label className="text-sm">Delete Proxies</Label>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Remove generated proxy videos for this project
-                    </p>
-                  </div>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 w-28 gap-1.5"
-                    onClick={handleClearProxies}
-                    disabled={proxyState !== 'idle'}
-                  >
-                    {proxyState === 'clearing' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                    {proxyState === 'done' && <Check className="w-3.5 h-3.5" />}
-                    {proxyState === 'idle' && <Film className="w-3.5 h-3.5" />}
-                    {proxyState === 'clearing' ? 'Deleting...' : proxyState === 'done' ? 'Deleted' : 'Delete'}
-                  </Button>
-                </div>
-              </div>
-            </section>
+                </section>
 
+                {/* Storage Section */}
+                <section className="space-y-4">
+                  <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground/70">Storage & Maintenance</h3>
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">Clear Project Cache</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Waveforms, filmstrips, GIF frames, decoded audio.
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-28 gap-1.5"
+                        onClick={() => setShowClearConfirm(true)}
+                        disabled={clearState !== 'idle'}
+                      >
+                        {clearState === 'clearing' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {clearState === 'done' && <Check className="w-3.5 h-3.5" />}
+                        {clearState === 'idle' && <Trash2 className="w-3.5 h-3.5" />}
+                        {clearState === 'clearing' ? 'Clearing...' : clearState === 'done' ? 'Cleared' : 'Clear'}
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">Regenerate Thumbnails</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Re-create media library thumbnails for this project.
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-28 gap-1.5"
+                        onClick={handleRegenThumbnails}
+                        disabled={regenState !== 'idle'}
+                      >
+                        {regenState === 'working' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {regenState === 'done' && <Check className="w-3.5 h-3.5" />}
+                        {regenState === 'idle' && <ImagePlus className="w-3.5 h-3.5" />}
+                        {regenState === 'working' ? regenProgress : regenState === 'done' ? 'Done' : 'Regenerate'}
+                      </Button>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="space-y-0.5">
+                        <Label className="text-sm font-medium">Delete Proxies</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Remove generated proxy videos for this project.
+                        </p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 w-28 gap-1.5"
+                        onClick={handleClearProxies}
+                        disabled={proxyState !== 'idle'}
+                      >
+                        {proxyState === 'clearing' && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                        {proxyState === 'done' && <Check className="w-3.5 h-3.5" />}
+                        {proxyState === 'idle' && <Film className="w-3.5 h-3.5" />}
+                        {proxyState === 'clearing' ? 'Deleting...' : proxyState === 'done' ? 'Deleted' : 'Delete'}
+                      </Button>
+                    </div>
+                  </div>
+                </section>
               </div>
             </ScrollArea>
           </TabsContent>
+
           <TabsContent value="prompts" className="mt-0 min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden">
             <ScrollArea className="h-[min(70vh,560px)]">
               <PromptsSettingsPanel visible={open && settingsTab === 'prompts'} />

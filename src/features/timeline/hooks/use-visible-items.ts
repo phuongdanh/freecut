@@ -38,12 +38,17 @@ interface VisibleItemsSnapshot {
   visibleTransitions: Transition[];
 }
 
+function getTrackVisibleTransitions(trackId: string): Transition[] | undefined {
+  const transitionsState = useTransitionsStore.getState();
+  return transitionsState.transitionsByTrackId[trackId] ?? EMPTY_TRANSITIONS;
+}
+
 function computeVisibleItemsSnapshot(trackId: string): VisibleItemsSnapshot {
   const { scrollLeft, viewportWidth } = useTimelineViewportStore.getState();
   const { pixelsPerSecond } = useZoomStore.getState();
   const { fps } = useTimelineSettingsStore.getState();
   const items = useItemsStore.getState().itemsByTrackId[trackId];
-  const transitions = useTransitionsStore.getState().transitionsByTrackId[trackId];
+  const transitions = getTrackVisibleTransitions(trackId);
   const visibleFrameRange = getVisibleFrameRange(scrollLeft, viewportWidth, pixelsPerSecond, fps);
   const visibleItems = getVisibleItemsForRange(items, visibleFrameRange);
   const visibleTransitions = getVisibleTransitionsForRange(
@@ -80,7 +85,7 @@ export function useVisibleItems(trackId: string) {
       const { pixelsPerSecond } = useZoomStore.getState();
       const { fps } = useTimelineSettingsStore.getState();
       const items = useItemsStore.getState().itemsByTrackId[trackId];
-      const transitions = useTransitionsStore.getState().transitionsByTrackId[trackId];
+      const transitions = getTrackVisibleTransitions(trackId);
       const { scrollLeft, viewportWidth } = useTimelineViewportStore.getState();
       const newRange = getVisibleFrameRange(scrollLeft, viewportWidth, pixelsPerSecond, fps);
 

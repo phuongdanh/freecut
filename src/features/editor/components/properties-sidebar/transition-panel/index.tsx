@@ -1,10 +1,17 @@
-﻿import { useMemo, useCallback, memo } from 'react';
+import { useMemo, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import {
-  Blend,
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectLabel,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import {
   Trash2,
   Zap,
-  Copy,
   RotateCcw,
 } from 'lucide-react';
 import { useTimelineStore } from '@/features/editor/deps/timeline-store';
@@ -23,102 +30,33 @@ import {
   type PresentationConfig,
 } from '@/types/transition';
 import { cn } from '@/shared/ui/cn';
+import { transitionRegistry } from '@/domain/timeline/transitions';
 import {
-  TRANSITION_ICON_MAP,
   TRANSITION_CATEGORY_INFO,
-  TRANSITION_CATEGORY_ORDER,
-  TRANSITION_CONFIGS_BY_CATEGORY,
+  getTransitionConfigsByCategory,
 } from '@/features/editor/utils/transition-ui-config';
+import { getMaxTransitionDurationForHandles } from '@/features/editor/deps/timeline-utils';
 
-/**
- * Single presentation option button
- */
-const PresentationButton = memo(function PresentationButton({
-  config,
-  isSelected,
-  onClick,
-}: {
-  config: PresentationConfig;
-  isSelected: boolean;
-  onClick: () => void;
-}) {
-  const Icon = TRANSITION_ICON_MAP[config.icon] || Blend;
+function getPresentationOptionValue(config: Pick<PresentationConfig, 'id' | 'direction'>): string {
+  return config.direction ? `${config.id}:${config.direction}` : config.id;
+}
 
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={cn(
-        'flex flex-col items-center justify-center gap-1 p-2 rounded-md border transition-all',
-        'hover:bg-secondary/50 hover:border-primary/50',
-        isSelected
-          ? 'bg-primary/10 border-primary text-primary'
-          : 'bg-secondary/30 border-border text-muted-foreground'
-      )}
-      title={config.description}
-    >
-      <Icon className="w-4 h-4" />
-      <span className="text-[10px] font-medium truncate max-w-full">
-        {config.label}
-      </span>
-    </button>
-  );
-});
+function getPresentationOptionLabel(config: Pick<PresentationConfig, 'label' | 'description' | 'direction'>): string {
+  return config.direction ? config.description : config.label;
+}
 
-/**
- * Grid of presentation options grouped by category
- */
-const PresentationPicker = memo(function PresentationPicker({
-  currentPresentation,
-  currentDirection,
-  onSelect,
-}: {
-  currentPresentation: TransitionPresentation;
-  currentDirection?: WipeDirection | SlideDirection | FlipDirection;
-  onSelect: (
-    presentation: TransitionPresentation,
-    direction?: WipeDirection | SlideDirection | FlipDirection
-  ) => void;
-}) {
-  // Check if a config matches current selection
-  const isSelected = useCallback(
-    (config: PresentationConfig) => {
-      if (config.id !== currentPresentation) return false;
-      // For directional transitions, also check direction
-      if (config.direction) {
-        return config.direction === currentDirection;
-      }
-      return true;
-    },
-    [currentPresentation, currentDirection]
-  );
+const EASE_OPTIONS = [
+  { value: 'linear', label: 'Linear' },
+  { value: 'ease-in', label: 'In' },
+  { value: 'ease-out', label: 'Out' },
+  { value: 'ease-in-out', label: 'In & Out' },
+] as const satisfies ReadonlyArray<{ value: TransitionTiming; label: string }>;
 
-  return (
-    <div className="space-y-3">
-      {TRANSITION_CATEGORY_ORDER.map((category) => {
-        const configs = TRANSITION_CONFIGS_BY_CATEGORY[category];
-        if (!configs || configs.length === 0) return null;
-        return (
-          <div key={category}>
-            <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-              {TRANSITION_CATEGORY_INFO[category]?.title ?? category}
-            </span>
-            <div className="grid grid-cols-4 gap-1 mt-1">
-              {configs.map((config, idx) => (
-                <PresentationButton
-                  key={`${config.id}-${config.direction || idx}`}
-                  config={config}
-                  isSelected={isSelected(config)}
-                  onClick={() => onSelect(config.id, config.direction)}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-});
+function getSupportedEaseOptions(
+  supportedTimings: readonly TransitionTiming[],
+): ReadonlyArray<(typeof EASE_OPTIONS)[number]> {
+  return EASE_OPTIONS.filter((option) => supportedTimings.includes(option.value));
+}
 
 /**
  * Transition properties panel - shown when a transition is selected.
@@ -136,13 +74,11 @@ export function TransitionPanel() {
   const updateTransition = useTimelineStore(
     (s: TimelineActions) => s.updateTransition
   );
-  const updateTransitions = useTimelineStore(
-    (s: TimelineActions) => s.updateTransitions
-  );
   const removeTransition = useTimelineStore(
     (s: TimelineActions) => s.removeTransition
   );
   const fps = useTimelineStore((s: TimelineState) => s.fps);
+  const items = useTimelineStore((s: TimelineState) => s.items);
 
   // Derive selected transition
   const selectedTransition = useMemo<Transition | undefined>(
@@ -155,17 +91,54 @@ export function TransitionPanel() {
     selectedTransition && selectedTransition.type in TRANSITION_CONFIGS
       ? TRANSITION_CONFIGS[selectedTransition.type]
       : null;
-
-  // Presentations that support spring timing (transforms that can overshoot)
-  const supportsSpringTiming = useCallback(
-    (presentation: TransitionPresentation) => {
-      return presentation === 'slide' || presentation === 'flip';
-    },
-    []
+  const leftClip = useMemo(
+    () => selectedTransition ? items.find((item) => item.id === selectedTransition.leftClipId) : null,
+    [items, selectedTransition],
+  );
+  const rightClip = useMemo(
+    () => selectedTransition ? items.find((item) => item.id === selectedTransition.rightClipId) : null,
+    [items, selectedTransition],
+  );
+  const presentationConfigGroups = useMemo(
+    () => Object.entries(getTransitionConfigsByCategory()).filter(([, configs]) => configs.length > 0),
+    [],
+  );
+  const presentationConfigs = useMemo(
+    () => presentationConfigGroups.flatMap(([, configs]) => configs),
+    [presentationConfigGroups],
+  );
+  const currentPresentationConfig = useMemo(
+    () => presentationConfigs.find((config) => (
+      config.id === selectedTransition?.presentation
+      && (config.direction ?? undefined) === (selectedTransition?.direction ?? undefined)
+    )),
+    [presentationConfigs, selectedTransition?.presentation, selectedTransition?.direction],
+  );
+  const transitionDefinition = useMemo(
+    () => selectedTransition ? transitionRegistry.getDefinition(selectedTransition.presentation) : undefined,
+    [selectedTransition],
+  );
+  const easeOptions = useMemo(
+    () => getSupportedEaseOptions(transitionDefinition?.supportedTimings ?? []),
+    [transitionDefinition],
   );
 
-  const minDuration = fps;
-  const maxDuration = fps * 3;
+  const minDuration = 1;
+  const maxDuration = useMemo(() => {
+    if (!transitionConfig || !selectedTransition || !leftClip || !rightClip) {
+      return fps * 3;
+    }
+
+    const leftEnd = leftClip.from + leftClip.durationInFrames;
+    const isAdjacent = Math.abs(leftEnd - rightClip.from) <= 1;
+    if (!isAdjacent) {
+      const legacyMax = Math.floor(Math.min(leftClip.durationInFrames, rightClip.durationInFrames) - 1);
+      return Math.max(minDuration, Math.max(selectedTransition.durationInFrames, Math.min(fps * 3, legacyMax)));
+    }
+
+    const handleMax = getMaxTransitionDurationForHandles(leftClip, rightClip, selectedTransition.alignment);
+    return Math.max(minDuration, Math.max(selectedTransition.durationInFrames, Math.min(fps * 3, handleMax)));
+  }, [transitionConfig, selectedTransition, leftClip, rightClip, fps]);
 
   // Handle presentation change
   const handlePresentationChange = useCallback(
@@ -174,16 +147,30 @@ export function TransitionPanel() {
       direction?: WipeDirection | SlideDirection | FlipDirection
     ) => {
       if (selectedTransitionId) {
-        // Reset timing to linear if switching to a presentation that doesn't support spring
         const updates: Partial<Transition> = { presentation, direction };
-        if (!supportsSpringTiming(presentation) && selectedTransition?.timing === 'spring') {
-          updates.timing = 'linear';
+        const nextDefinition = transitionRegistry.getDefinition(presentation);
+        const nextEaseOptions = getSupportedEaseOptions(nextDefinition?.supportedTimings ?? []);
+        const fallbackEase = nextEaseOptions[0];
+        const currentTiming = selectedTransition?.timing;
+        if (
+          fallbackEase
+          && nextDefinition
+          && currentTiming
+          && !nextDefinition.supportedTimings.includes(currentTiming)
+        ) {
+          updates.timing = fallbackEase.value;
         }
         updateTransition(selectedTransitionId, updates);
       }
     },
-    [selectedTransitionId, updateTransition, supportsSpringTiming, selectedTransition?.timing]
+    [selectedTransitionId, selectedTransition?.timing, updateTransition]
   );
+
+  const handlePresentationPresetChange = useCallback((value: string) => {
+    const config = presentationConfigs.find((entry) => getPresentationOptionValue(entry) === value);
+    if (!config) return;
+    handlePresentationChange(config.id, config.direction);
+  }, [handlePresentationChange, presentationConfigs]);
 
   // Handle duration change (in frames)
   const handleDurationChange = useCallback(
@@ -200,7 +187,7 @@ export function TransitionPanel() {
   );
 
   // Default duration is 1 second (fps frames)
-  const defaultDuration = fps;
+  const defaultDuration = Math.min(fps, maxDuration);
 
   // Handle reset duration to default (1 second)
   const handleResetDuration = useCallback(() => {
@@ -230,33 +217,6 @@ export function TransitionPanel() {
       clearSelection();
     }
   }, [selectedTransitionId, removeTransition, clearSelection]);
-
-  // Handle apply duration to all other transitions (single undo)
-  const handleApplyDurationToAll = useCallback(() => {
-    if (!selectedTransition) return;
-
-    const otherTransitions = transitions.filter(
-      (t: Transition) => t.id !== selectedTransition.id
-    );
-
-    if (otherTransitions.length === 0) return;
-
-    // Batch update for single undo
-    updateTransitions(
-      otherTransitions.map((t) => ({
-        id: t.id,
-        updates: { durationInFrames: selectedTransition.durationInFrames },
-      }))
-    );
-  }, [selectedTransition, transitions, updateTransitions]);
-
-  // Count other transitions for button label
-  const otherTransitionsCount = useMemo(() => {
-    if (!selectedTransition) return 0;
-    return transitions.filter(
-      (t: Transition) => t.id !== selectedTransition.id
-    ).length;
-  }, [selectedTransition, transitions]);
 
   // Format duration for display
   const formatDuration = useCallback(
@@ -293,14 +253,36 @@ export function TransitionPanel() {
   return (
     <div className="space-y-4">
       <PropertySection title="Transition" icon={Zap} defaultOpen={true}>
-        {/* Presentation picker */}
-        <div className="py-2">
-          <PresentationPicker
-            currentPresentation={selectedTransition.presentation}
-            currentDirection={selectedTransition.direction}
-            onSelect={handlePresentationChange}
-          />
-        </div>
+        <PropertyRow label="Preset" tooltip="Transition style preset">
+          <div className="w-full">
+            <Select
+              value={currentPresentationConfig ? getPresentationOptionValue(currentPresentationConfig) : undefined}
+              onValueChange={handlePresentationPresetChange}
+            >
+              <SelectTrigger className="h-7 text-xs flex-1 min-w-0">
+                <SelectValue placeholder="Select preset" />
+              </SelectTrigger>
+              <SelectContent>
+                {presentationConfigGroups.map(([category, configs]) => (
+                  <SelectGroup key={category}>
+                    <SelectLabel className="text-[10px] text-muted-foreground">
+                      {TRANSITION_CATEGORY_INFO[category]?.title ?? category}
+                    </SelectLabel>
+                    {configs.map((config) => (
+                      <SelectItem
+                        key={getPresentationOptionValue(config)}
+                        value={getPresentationOptionValue(config)}
+                        className="text-xs"
+                      >
+                        {getPresentationOptionLabel(config)}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </PropertyRow>
 
         {/* Duration slider */}
         <PropertyRow label="Duration" tooltip="Transition duration">
@@ -328,54 +310,30 @@ export function TransitionPanel() {
           </div>
         </PropertyRow>
 
-        {/* Timing toggle - only show for slide/flip presentations that support spring */}
-        {supportsSpringTiming(selectedTransition.presentation) && (
-          <PropertyRow label="Timing" tooltip="Easing function for the transition">
+        {easeOptions.length > 0 && (
+          <PropertyRow label="Ease" tooltip="Easing curve for the transition">
             <div className="flex items-center gap-0.5 p-0.5 bg-secondary rounded-md">
+              {easeOptions.map((option) => (
               <button
+                key={option.value}
                 type="button"
-                onClick={() => handleTimingChange('linear')}
+                onClick={() => handleTimingChange(option.value)}
                 className={cn(
                   'px-3 py-1 text-xs rounded transition-colors',
-                  selectedTransition.timing === 'linear'
+                  selectedTransition.timing === option.value
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
                 )}
               >
-                Linear
+                {option.label}
               </button>
-              <button
-                type="button"
-                onClick={() => handleTimingChange('spring')}
-                className={cn(
-                  'px-3 py-1 text-xs rounded transition-colors',
-                  selectedTransition.timing === 'spring'
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                )}
-              >
-                Spring
-              </button>
+              ))}
             </div>
           </PropertyRow>
         )}
 
         {/* Action buttons */}
-        <div className="pt-2 space-y-2">
-          {/* Apply duration to all - only show if there are other transitions */}
-          {otherTransitionsCount > 0 && (
-            <Button
-              variant="secondary"
-              size="sm"
-              className="w-full h-7 text-xs"
-              onClick={handleApplyDurationToAll}
-              title={`Apply ${formatDuration(selectedTransition.durationInFrames)} duration to ${otherTransitionsCount} other transition${otherTransitionsCount > 1 ? 's' : ''}`}
-            >
-              <Copy className="w-3 h-3 mr-1.5" />
-              Apply duration to all ({otherTransitionsCount})
-            </Button>
-          )}
-
+        <div className="pt-2">
           {/* Delete button */}
           <Button
             variant="destructive"

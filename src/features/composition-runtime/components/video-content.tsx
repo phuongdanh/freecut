@@ -47,6 +47,7 @@ const NativePreviewVideo: React.FC<{
   audioVolume: number;
   onError: (error: Error) => void;
   containerRef: React.RefObject<HTMLDivElement | null>;
+  fitMode?: 'contain' | 'fill';
   forceCssComposite?: boolean;
   sharedTransitionSync?: boolean;
 }> = ({
@@ -60,6 +61,7 @@ const NativePreviewVideo: React.FC<{
   audioVolume,
   onError,
   containerRef,
+  fitMode = 'contain',
   forceCssComposite = false,
   sharedTransitionSync = false,
 }) => {
@@ -197,9 +199,9 @@ const NativePreviewVideo: React.FC<{
 
     // CRITICAL: Unmute video element immediately after acquisition
     // Pool creates elements muted, and we need audio to work.
-    // This must happen here (not just in volume effect) because when crossing
-    // split boundaries, itemId changes causing this effect to re-run, but
-    // the volume effect won't re-run if audioVolume hasn't changed.
+    // Item-id-only handoffs reuse the same acquired element and are handled
+    // by registration/sync effects below, so this only runs when the actual
+    // pool lane/source changes.
     element.muted = false;
 
     // Also resume AudioContext if this element was previously connected
@@ -306,7 +308,7 @@ const NativePreviewVideo: React.FC<{
     if (container && element.parentElement !== container) {
       element.style.width = '100%';
       element.style.height = '100%';
-      element.style.objectFit = 'contain';
+      element.style.objectFit = fitMode;
       element.style.display = 'block';
       element.style.position = 'absolute';
       element.style.top = '0';
@@ -405,9 +407,11 @@ const NativePreviewVideo: React.FC<{
 
       videoLog.debug(`[${shortId}] released`);
     };
-    // Note: frame, fps, targetTime intentionally NOT in deps - we only want to acquire once on mount
-    // Ongoing seeking is handled by the separate sync effect
-  }, [poolClipId, src, pool, containerRef, shortId, itemId, syncRegisteredVideoElement, clearRegisteredVideoElement]);
+    // Note: frame, fps, targetTime intentionally NOT in deps - we only want to acquire once per lane/source
+    // Ongoing seeking is handled by the separate sync effect, and itemId-only
+    // handoffs are handled by the registration + sync refs without tearing down
+    // the element across split-boundary transitions.
+  }, [poolClipId, src, pool, containerRef, shortId, syncRegisteredVideoElement, clearRegisteredVideoElement, fitMode]);
 
   useEffect(() => {
     const element = elementRef.current;
@@ -804,7 +808,12 @@ export const VideoContent: React.FC<{
   sourceFps: number;
   forceCssComposite?: boolean;
 }> = ({ item, muted, safeTrimBefore, playbackRate, sourceFps, forceCssComposite = false }) => {
-  const audioVolume = useVideoAudioVolume(item, muted);
+  const baseAudioVolume = useVideoAudioVolume(item, muted);
+  // During transition overlaps, the composition's audio crossfade system
+  // (CustomDecoderAudio) handles audio mixing. Mute the DOM video element
+  // to prevent doubling — one audio stream from the element and another
+  // from the crossfade renderer.
+  const audioVolume = item._sharedTransitionSync ? 0 : baseAudioVolume;
   const [hasError, setHasError] = useState(false);
 
   // NativePreviewVideo mounts pooled <video> into this container.
@@ -848,6 +857,7 @@ export const VideoContent: React.FC<{
       audioVolume={audioVolume}
       onError={handleError}
       containerRef={containerRef}
+      fitMode="fill"
       forceCssComposite={forceCssComposite}
       sharedTransitionSync={item._sharedTransitionSync === true}
     />

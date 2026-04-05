@@ -3,6 +3,7 @@ import { useEditorStore } from './editor-store';
 import {
   DEFAULT_EDITOR_DENSITY_PRESET,
   getEditorLayout,
+  getLeftEditorSidebarBounds,
 } from '@/shared/ui/editor-layout';
 import { useSettingsStore } from '@/features/editor/deps/settings';
 
@@ -16,12 +17,18 @@ describe('editor-store', () => {
       activePanel: null,
       leftSidebarOpen: true,
       rightSidebarOpen: true,
+      keyframeEditorOpen: false,
       activeTab: 'media',
-      clipInspectorTab: 'transform',
-      sidebarWidth: editorLayout.sidebarDefaultWidth,
-      rightSidebarWidth: editorLayout.sidebarDefaultWidth,
+      clipInspectorTab: 'video',
+      sidebarWidth: editorLayout.leftSidebarDefaultWidth,
+      rightSidebarWidth: editorLayout.rightSidebarDefaultWidth,
       timelineHeight: 250,
       sourcePreviewMediaId: null,
+      mediaSkimPreviewMediaId: null,
+      mediaSkimPreviewFrame: null,
+      compoundClipSkimPreviewCompositionId: null,
+      compoundClipSkimPreviewFrame: null,
+      linkedSelectionEnabled: true,
       colorScopesOpen: false,
     });
   });
@@ -31,9 +38,15 @@ describe('editor-store', () => {
     expect(state.activePanel).toBe(null);
     expect(state.leftSidebarOpen).toBe(true);
     expect(state.rightSidebarOpen).toBe(true);
+    expect(state.keyframeEditorOpen).toBe(false);
     expect(state.activeTab).toBe('media');
-    expect(state.clipInspectorTab).toBe('transform');
+    expect(state.clipInspectorTab).toBe('video');
     expect(state.sourcePreviewMediaId).toBe(null);
+    expect(state.mediaSkimPreviewMediaId).toBe(null);
+    expect(state.mediaSkimPreviewFrame).toBe(null);
+    expect(state.compoundClipSkimPreviewCompositionId).toBe(null);
+    expect(state.compoundClipSkimPreviewFrame).toBe(null);
+    expect(state.linkedSelectionEnabled).toBe(true);
     expect(state.colorScopesOpen).toBe(false);
   });
 
@@ -65,20 +78,36 @@ describe('editor-store', () => {
     expect(useEditorStore.getState().rightSidebarOpen).toBe(true);
   });
 
+  it('opens the keyframe editor and reveals the left sidebar', () => {
+    useEditorStore.getState().setLeftSidebarOpen(false);
+    expect(useEditorStore.getState().keyframeEditorOpen).toBe(false);
+
+    useEditorStore.getState().toggleKeyframeEditorOpen();
+
+    expect(useEditorStore.getState().keyframeEditorOpen).toBe(true);
+    expect(useEditorStore.getState().leftSidebarOpen).toBe(true);
+
+    useEditorStore.getState().setKeyframeEditorOpen(false);
+    expect(useEditorStore.getState().keyframeEditorOpen).toBe(false);
+  });
+
   it('sets active tab', () => {
     useEditorStore.getState().setActiveTab('effects');
     expect(useEditorStore.getState().activeTab).toBe('effects');
 
     useEditorStore.getState().setActiveTab('transitions');
     expect(useEditorStore.getState().activeTab).toBe('transitions');
+
+    useEditorStore.getState().setActiveTab('ai');
+    expect(useEditorStore.getState().activeTab).toBe('ai');
   });
 
   it('sets clip inspector tab', () => {
     useEditorStore.getState().setClipInspectorTab('effects');
     expect(useEditorStore.getState().clipInspectorTab).toBe('effects');
 
-    useEditorStore.getState().setClipInspectorTab('media');
-    expect(useEditorStore.getState().clipInspectorTab).toBe('media');
+    useEditorStore.getState().setClipInspectorTab('audio');
+    expect(useEditorStore.getState().clipInspectorTab).toBe('audio');
   });
 
   it('sets sidebar widths', () => {
@@ -95,11 +124,64 @@ describe('editor-store', () => {
   });
 
   it('sets source preview media id', () => {
+    useEditorStore.getState().setMediaSkimPreview('media-hover', 12);
     useEditorStore.getState().setSourcePreviewMediaId('media-123');
     expect(useEditorStore.getState().sourcePreviewMediaId).toBe('media-123');
+    expect(useEditorStore.getState().mediaSkimPreviewMediaId).toBe(null);
+    expect(useEditorStore.getState().mediaSkimPreviewFrame).toBe(null);
+    expect(useEditorStore.getState().compoundClipSkimPreviewCompositionId).toBe(null);
+    expect(useEditorStore.getState().compoundClipSkimPreviewFrame).toBe(null);
 
     useEditorStore.getState().setSourcePreviewMediaId(null);
     expect(useEditorStore.getState().sourcePreviewMediaId).toBe(null);
+  });
+
+  it('tracks media skim preview state', () => {
+    useEditorStore.getState().setMediaSkimPreview('media-123', 45);
+    expect(useEditorStore.getState().mediaSkimPreviewMediaId).toBe('media-123');
+    expect(useEditorStore.getState().mediaSkimPreviewFrame).toBe(45);
+
+    useEditorStore.getState().clearMediaSkimPreview();
+    expect(useEditorStore.getState().mediaSkimPreviewMediaId).toBe(null);
+    expect(useEditorStore.getState().mediaSkimPreviewFrame).toBe(null);
+  });
+
+  it('tracks compound clip skim preview state', () => {
+    useEditorStore.getState().setCompoundClipSkimPreview('composition-123', 18);
+    expect(useEditorStore.getState().compoundClipSkimPreviewCompositionId).toBe('composition-123');
+    expect(useEditorStore.getState().compoundClipSkimPreviewFrame).toBe(18);
+    expect(useEditorStore.getState().mediaSkimPreviewMediaId).toBe(null);
+    expect(useEditorStore.getState().mediaSkimPreviewFrame).toBe(null);
+
+    useEditorStore.getState().clearCompoundClipSkimPreview();
+    expect(useEditorStore.getState().compoundClipSkimPreviewCompositionId).toBe(null);
+    expect(useEditorStore.getState().compoundClipSkimPreviewFrame).toBe(null);
+  });
+
+  it('does not publish a new state object when skim preview values are unchanged', () => {
+    useEditorStore.getState().setMediaSkimPreview('media-123', 45);
+    const currentState = useEditorStore.getState();
+
+    useEditorStore.getState().setMediaSkimPreview('media-123', 45);
+    expect(useEditorStore.getState()).toBe(currentState);
+
+    useEditorStore.getState().clearMediaSkimPreview();
+    const clearedState = useEditorStore.getState();
+
+    useEditorStore.getState().clearMediaSkimPreview();
+    expect(useEditorStore.getState()).toBe(clearedState);
+
+    useEditorStore.getState().setCompoundClipSkimPreview('composition-123', 18);
+    const compoundCurrentState = useEditorStore.getState();
+
+    useEditorStore.getState().setCompoundClipSkimPreview('composition-123', 18);
+    expect(useEditorStore.getState()).toBe(compoundCurrentState);
+
+    useEditorStore.getState().clearCompoundClipSkimPreview();
+    const compoundClearedState = useEditorStore.getState();
+
+    useEditorStore.getState().clearCompoundClipSkimPreview();
+    expect(useEditorStore.getState()).toBe(compoundClearedState);
   });
 
   it('toggles the color scopes monitor', () => {
@@ -112,6 +194,16 @@ describe('editor-store', () => {
     expect(useEditorStore.getState().colorScopesOpen).toBe(false);
   });
 
+  it('toggles linked selection', () => {
+    expect(useEditorStore.getState().linkedSelectionEnabled).toBe(true);
+
+    useEditorStore.getState().setLinkedSelectionEnabled(false);
+    expect(useEditorStore.getState().linkedSelectionEnabled).toBe(false);
+
+    useEditorStore.getState().toggleLinkedSelectionEnabled();
+    expect(useEditorStore.getState().linkedSelectionEnabled).toBe(true);
+  });
+
   it('directly sets left/right sidebar open state', () => {
     useEditorStore.getState().setLeftSidebarOpen(false);
     expect(useEditorStore.getState().leftSidebarOpen).toBe(false);
@@ -121,13 +213,14 @@ describe('editor-store', () => {
   });
 
   it('reclamps sidebar widths when syncing sidebar layout', () => {
-    useEditorStore.getState().setSidebarWidth(480);
-    useEditorStore.getState().setRightSidebarWidth(480);
-
     const compactLayout = getEditorLayout('compact');
+    const compactLeftMaxWidth = getLeftEditorSidebarBounds(compactLayout).maxWidth;
+
+    useEditorStore.getState().setSidebarWidth(compactLeftMaxWidth + 100);
+    useEditorStore.getState().setRightSidebarWidth(480);
     useEditorStore.getState().syncSidebarLayout(compactLayout);
 
-    expect(useEditorStore.getState().sidebarWidth).toBe(compactLayout.sidebarMaxWidth);
-    expect(useEditorStore.getState().rightSidebarWidth).toBe(compactLayout.sidebarMaxWidth);
+    expect(useEditorStore.getState().sidebarWidth).toBe(compactLeftMaxWidth);
+    expect(useEditorStore.getState().rightSidebarWidth).toBe(compactLayout.rightSidebarMaxWidth);
   });
 });

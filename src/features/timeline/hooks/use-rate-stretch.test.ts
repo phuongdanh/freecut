@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { MAX_SPEED, timelineToSourceFrames } from '../utils/source-calculations';
-import { getDurationLimits, getClampedSpeed, resolveDurationAndSpeed } from './use-rate-stretch';
+import {
+  getClampedSpeed,
+  getDurationLimits,
+  getLoopingMediaStretchPreviewSpeed,
+  isRateStretchableItem,
+  resolveDurationAndSpeed,
+} from './use-rate-stretch';
 
 describe('use-rate-stretch regression', () => {
   it('uses a ceil-based min duration so max-speed stretch does not drop source frames', () => {
@@ -35,5 +41,19 @@ describe('use-rate-stretch regression', () => {
       sourceFps
     );
     expect(coveredSourceFrames).toBeGreaterThanOrEqual(sourceDuration);
+  });
+
+  it('treats directional looping-media drags as left=faster and right=slower', () => {
+    expect(getLoopingMediaStretchPreviewSpeed(1, -30)).toBe(1.1);
+    expect(getLoopingMediaStretchPreviewSpeed(1, 30)).toBe(0.9);
+  });
+
+  it('recognizes supported rate-stretch clip types', () => {
+    expect(isRateStretchableItem({ type: 'video', label: 'clip.mp4' } as const)).toBe(true);
+    expect(isRateStretchableItem({ type: 'audio', label: 'clip.wav' } as const)).toBe(true);
+    expect(isRateStretchableItem({ type: 'composition', label: 'Nested comp' } as const)).toBe(true);
+    expect(isRateStretchableItem({ type: 'image', label: 'loop.gif' } as const)).toBe(true);
+    expect(isRateStretchableItem({ type: 'image', label: 'still.png' } as const)).toBe(false);
+    expect(isRateStretchableItem({ type: 'text', label: 'Title' } as const)).toBe(false);
   });
 });

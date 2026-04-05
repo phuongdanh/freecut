@@ -1,9 +1,12 @@
 import { useCallback, useMemo, useRef, useEffect, memo, Activity } from 'react';
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ChevronUp,
   Film,
   Layers,
+  LineChart,
   Type,
   Square,
   Circle,
@@ -15,15 +18,29 @@ import {
   Sparkles,
   Blend,
   Pen,
+  WandSparkles,
 } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { useEditorStore } from '@/shared/state/editor';
 import { useTimelineStore } from '@/features/editor/deps/timeline-store';
 import { usePlaybackStore } from '@/shared/state/playback';
 import { useSelectionStore } from '@/shared/state/selection';
 import { useProjectStore } from '@/features/editor/deps/projects';
-import { MediaLibrary } from '@/features/editor/deps/media-library';
+import {
+  clearMediaDragData,
+  MediaLibrary,
+  setMediaDragData,
+} from '@/features/editor/deps/media-library';
+import { KeyframeGraphPanel } from '@/features/editor/deps/timeline-ui';
 import { TransitionsPanel } from './transitions-panel';
-import { findNearestAvailableSpace } from '@/features/editor/deps/timeline-utils';
+import {
+  createDefaultAdjustmentItem,
+  createDefaultShapeItem,
+  createDefaultTextItem,
+  findCompatibleTrackForItemType,
+  findNearestAvailableSpace,
+  getDefaultGeneratedLayerDurationInFrames,
+} from '@/features/editor/deps/timeline-utils';
 import type { TextItem, ShapeItem, ShapeType, AdjustmentItem } from '@/types/timeline';
 import { useMaskEditorStore } from '@/features/editor/deps/preview';
 import type { VisualEffect, GpuEffect } from '@/types/effects';
@@ -32,9 +49,10 @@ import { getGpuCategoriesWithEffects, getGpuEffectDefaultParams } from '@/infras
 import { useEffectPreviews } from '@/features/editor/deps/effects-contract';
 import { createLogger } from '@/shared/logging/logger';
 import { useSettingsStore } from '@/features/editor/deps/settings';
+import { AiPanel } from './ai-panel';
 import {
   EDITOR_LAYOUT_CSS_VALUES,
-  clampEditorSidebarWidth,
+  clampLeftEditorSidebarWidth,
   getEditorLayout,
 } from '@/shared/ui/editor-layout';
 
@@ -46,15 +64,42 @@ export const MediaSidebar = memo(function MediaSidebar() {
   // Use granular selectors - Zustand v5 best practice
   const leftSidebarOpen = useEditorStore((s) => s.leftSidebarOpen);
   const toggleLeftSidebar = useEditorStore((s) => s.toggleLeftSidebar);
+  const mediaFullColumn = useEditorStore((s) => s.mediaFullColumn);
+  const toggleMediaFullColumn = useEditorStore((s) => s.toggleMediaFullColumn);
+  const keyframeEditorOpen = useEditorStore((s) => s.keyframeEditorOpen);
+  const setKeyframeEditorOpen = useEditorStore((s) => s.setKeyframeEditorOpen);
+  const toggleKeyframeEditorOpen = useEditorStore((s) => s.toggleKeyframeEditorOpen);
   const activeTab = useEditorStore((s) => s.activeTab);
   const setActiveTab = useEditorStore((s) => s.setActiveTab);
   const sidebarWidth = useEditorStore((s) => s.sidebarWidth);
   const setSidebarWidth = useEditorStore((s) => s.setSidebarWidth);
 
+  // Auto-expand sidebar to 35% viewport when keyframe editor opens
+  const prevKeyframeOpenRef = useRef(keyframeEditorOpen);
+  const savedWidthBeforeExpandRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const wasOpen = prevKeyframeOpenRef.current;
+    prevKeyframeOpenRef.current = keyframeEditorOpen;
+
+    if (keyframeEditorOpen && !wasOpen) {
+      const targetWidth = Math.floor(window.innerWidth * 0.35);
+      const clamped = clampLeftEditorSidebarWidth(targetWidth, editorLayout);
+      if (clamped > sidebarWidth) {
+        savedWidthBeforeExpandRef.current = sidebarWidth;
+        setSidebarWidth(clamped);
+      }
+    } else if (!keyframeEditorOpen && wasOpen && savedWidthBeforeExpandRef.current !== null) {
+      setSidebarWidth(savedWidthBeforeExpandRef.current);
+      savedWidthBeforeExpandRef.current = null;
+    }
+  }, [keyframeEditorOpen, editorLayout, sidebarWidth, setSidebarWidth]);
+
   // Resize handle logic
   const isResizingRef = useRef(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
+  const suppressGeneratedItemClickRef = useRef(false);
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -69,7 +114,7 @@ export const MediaSidebar = memo(function MediaSidebar() {
     const handleMouseMove = (e: MouseEvent) => {
       if (!isResizingRef.current) return;
       const delta = e.clientX - startXRef.current;
-      const newWidth = clampEditorSidebarWidth(startWidthRef.current + delta, editorLayout);
+      const newWidth = clampLeftEditorSidebarWidth(startWidthRef.current + delta, editorLayout);
       setSidebarWidth(newWidth);
     };
 
@@ -102,23 +147,19 @@ export const MediaSidebar = memo(function MediaSidebar() {
     const { activeTrackId, selectItems } = useSelectionStore.getState();
     const currentProject = useProjectStore.getState().currentProject;
 
-    // Use active track if available and not locked, otherwise find first available
-    let targetTrack = activeTrackId
-      ? tracks.find((t) => t.id === activeTrackId && t.visible !== false && !t.locked)
-      : null;
-
-    // Fallback to first available visible/unlocked track
-    if (!targetTrack) {
-      targetTrack = tracks.find((t) => t.visible !== false && !t.locked);
-    }
+    const targetTrack = findCompatibleTrackForItemType({
+      tracks,
+      items,
+      itemType: 'text',
+      preferredTrackId: activeTrackId,
+    });
 
     if (!targetTrack) {
       logger.warn('No available track for text item');
       return;
     }
 
-    // Default duration: 60 seconds
-    const durationInFrames = fps * 60;
+    const durationInFrames = getDefaultGeneratedLayerDurationInFrames(fps);
 
     // Find the best position: start at playhead, find nearest available space
     const proposedPosition = usePlaybackStore.getState().currentFrame;
@@ -133,34 +174,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
     const canvasWidth = currentProject?.metadata.width ?? 1920;
     const canvasHeight = currentProject?.metadata.height ?? 1080;
 
-    // Create a new text item
-    const textItem: TextItem = {
-      id: crypto.randomUUID(),
-      type: 'text',
+    const textItem: TextItem = createDefaultTextItem({
       trackId: targetTrack.id,
       from: finalPosition,
       durationInFrames,
-      label: 'Text',
-      text: 'Your Text Here',
-      fontSize: 60,
-      fontFamily: 'Inter',
-      fontWeight: 'normal',
-      fontStyle: 'normal',
-      underline: false,
-      color: '#ffffff',
-      textAlign: 'center',
-      lineHeight: 1.2,
-      letterSpacing: 0,
-      // Center the text on canvas
-      transform: {
-        x: 0,
-        y: 0,
-        width: canvasWidth * 0.8,
-        height: canvasHeight * 0.3,
-        rotation: 0,
-        opacity: 1,
-      },
-    };
+      canvasWidth,
+      canvasHeight,
+    });
 
     addItem(textItem);
     // Select the new item
@@ -174,23 +194,19 @@ export const MediaSidebar = memo(function MediaSidebar() {
     const { activeTrackId, selectItems } = useSelectionStore.getState();
     const currentProject = useProjectStore.getState().currentProject;
 
-    // Use active track if available and not locked, otherwise find first available
-    let targetTrack = activeTrackId
-      ? tracks.find((t) => t.id === activeTrackId && t.visible !== false && !t.locked)
-      : null;
-
-    // Fallback to first available visible/unlocked track
-    if (!targetTrack) {
-      targetTrack = tracks.find((t) => t.visible !== false && !t.locked);
-    }
+    const targetTrack = findCompatibleTrackForItemType({
+      tracks,
+      items,
+      itemType: 'shape',
+      preferredTrackId: activeTrackId,
+    });
 
     if (!targetTrack) {
       logger.warn('No available track for shape item');
       return;
     }
 
-    // Default duration: 60 seconds
-    const durationInFrames = fps * 60;
+    const durationInFrames = getDefaultGeneratedLayerDurationInFrames(fps);
 
     // Find the best position: start at playhead, find nearest available space
     const proposedPosition = usePlaybackStore.getState().currentFrame;
@@ -201,40 +217,17 @@ export const MediaSidebar = memo(function MediaSidebar() {
       items
     ) ?? proposedPosition;
 
-    // Get canvas dimensions for initial transform
     const canvasWidth = currentProject?.metadata.width ?? 1920;
     const canvasHeight = currentProject?.metadata.height ?? 1080;
 
-    // Shape size: 25% of canvas, centered
-    const shapeSize = Math.min(canvasWidth, canvasHeight) * 0.25;
-
-    // Create a new shape item with defaults based on shape type
-    const shapeItem: ShapeItem = {
-      id: crypto.randomUUID(),
-      type: 'shape',
+    const shapeItem: ShapeItem = createDefaultShapeItem({
       trackId: targetTrack.id,
       from: finalPosition,
       durationInFrames,
-      label: shapeType.charAt(0).toUpperCase() + shapeType.slice(1),
+      canvasWidth,
+      canvasHeight,
       shapeType,
-      fillColor: '#3b82f6', // Blue
-      strokeColor: undefined,
-      strokeWidth: 0,
-      cornerRadius: shapeType === 'rectangle' ? 0 : undefined,
-      direction: shapeType === 'triangle' ? 'up' : undefined,
-      points: shapeType === 'star' ? 5 : shapeType === 'polygon' ? 6 : undefined,
-      innerRadius: shapeType === 'star' ? 0.5 : undefined,
-      // Center the shape on canvas with locked aspect ratio
-      transform: {
-        x: 0,
-        y: 0,
-        width: shapeSize,
-        height: shapeSize,
-        rotation: 0,
-        opacity: 1,
-        aspectRatioLocked: true,
-      },
-    };
+    });
 
     addItem(shapeItem);
     // Select the new item
@@ -248,23 +241,19 @@ export const MediaSidebar = memo(function MediaSidebar() {
     const { tracks, items, fps, addItem } = useTimelineStore.getState();
     const { activeTrackId, selectItems } = useSelectionStore.getState();
 
-    // Use active track if available and not locked, otherwise find first available
-    let targetTrack = activeTrackId
-      ? tracks.find((t) => t.id === activeTrackId && t.visible !== false && !t.locked)
-      : null;
-
-    // Fallback to first available visible/unlocked track
-    if (!targetTrack) {
-      targetTrack = tracks.find((t) => t.visible !== false && !t.locked);
-    }
+    const targetTrack = findCompatibleTrackForItemType({
+      tracks,
+      items,
+      itemType: 'adjustment',
+      preferredTrackId: activeTrackId,
+    });
 
     if (!targetTrack) {
       logger.warn('No available track for adjustment layer');
       return;
     }
 
-    // Default duration: 60 seconds
-    const durationInFrames = fps * 60;
+    const durationInFrames = getDefaultGeneratedLayerDurationInFrames(fps);
 
     // Find the best position: start at playhead, find nearest available space
     const proposedPosition = usePlaybackStore.getState().currentFrame;
@@ -275,24 +264,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
       items
     ) ?? proposedPosition;
 
-    // Convert VisualEffect[] to ItemEffect[] with IDs
-    const itemEffects = effects?.map((effect) => ({
-      id: crypto.randomUUID(),
-      effect,
-      enabled: true,
-    })) ?? [];
-
-    // Create a new adjustment layer
-    const adjustmentItem: AdjustmentItem = {
-      id: crypto.randomUUID(),
-      type: 'adjustment',
+    const adjustmentItem: AdjustmentItem = createDefaultAdjustmentItem({
       trackId: targetTrack.id,
       from: finalPosition,
       durationInFrames,
-      label: label ?? 'Adjustment Layer',
-      effects: itemEffects,
-      effectOpacity: 1,
-    };
+      effects,
+      label,
+    });
 
     addItem(adjustmentItem);
     // Select the new item
@@ -352,7 +330,41 @@ export const MediaSidebar = memo(function MediaSidebar() {
     { id: 'shapes' as const, icon: Pentagon, label: 'Shapes' },
     { id: 'effects' as const, icon: Layers, label: 'Effects' },
     { id: 'transitions' as const, icon: Blend, label: 'Transitions' },
+    { id: 'ai' as const, icon: WandSparkles, label: 'AI' },
   ];
+
+  const shouldSuppressGeneratedItemClick = useCallback(() => {
+    if (!suppressGeneratedItemClickRef.current) {
+      return false;
+    }
+
+    suppressGeneratedItemClickRef.current = false;
+    return true;
+  }, []);
+
+  const handleTemplateDragStart = useCallback((payload: {
+    itemType: 'text' | 'shape' | 'adjustment';
+    label: string;
+    shapeType?: ShapeType;
+    effects?: VisualEffect[];
+  }) => (event: React.DragEvent<HTMLButtonElement>) => {
+    event.dataTransfer.effectAllowed = 'copy';
+    const dragData = {
+      type: 'timeline-template' as const,
+      ...payload,
+    };
+
+    suppressGeneratedItemClickRef.current = true;
+    event.dataTransfer.setData('application/json', JSON.stringify(dragData));
+    setMediaDragData(dragData);
+  }, []);
+
+  const handleTemplateDragEnd = useCallback(() => {
+    clearMediaDragData();
+    window.setTimeout(() => {
+      suppressGeneratedItemClickRef.current = false;
+    }, 0);
+  }, []);
 
   return (
     <div className="flex h-full flex-shrink-0">
@@ -368,7 +380,8 @@ export const MediaSidebar = memo(function MediaSidebar() {
         >
           <button
             onClick={toggleLeftSidebar}
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+            className="rounded-lg flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-secondary/50 transition-colors"
+            style={{ width: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize, height: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize }}
             data-tooltip={leftSidebarOpen ? 'Collapse Panel' : 'Expand Panel'}
             data-tooltip-side="right"
           >
@@ -407,6 +420,24 @@ export const MediaSidebar = memo(function MediaSidebar() {
               <Icon className="w-4 h-4" />
             </button>
           ))}
+
+          <div className="w-6 border-t border-border mx-auto my-0.5" />
+
+          <button
+            onClick={toggleKeyframeEditorOpen}
+            className={`
+              w-9 h-9 rounded-lg flex items-center justify-center transition-all
+              ${keyframeEditorOpen
+                ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'
+              }
+            `}
+            data-tooltip={keyframeEditorOpen ? 'Hide Keyframe Editor' : 'Keyframe Editor'}
+            data-tooltip-side="right"
+            aria-label={keyframeEditorOpen ? 'Hide keyframe editor' : 'Show keyframe editor'}
+          >
+            <LineChart className="w-4 h-4" />
+          </button>
         </div>
       </div>
 
@@ -419,27 +450,55 @@ export const MediaSidebar = memo(function MediaSidebar() {
       >
         {/* Use Activity for React 19 performance optimization - defers updates when hidden */}
         <Activity mode={leftSidebarOpen ? 'visible' : 'hidden'}>
-          <div className="h-full flex flex-col" style={{ width: sidebarWidth }}>
-          {/* Panel Header */}
+          <div className="h-full min-h-0 flex flex-col" style={{ width: sidebarWidth }}>
+          <KeyframeGraphPanel
+            isOpen={keyframeEditorOpen}
+            onToggle={toggleKeyframeEditorOpen}
+            onClose={() => setKeyframeEditorOpen(false)}
+            placement="top"
+          />
+
+          {/* Panel Header — sits with the tab content, below the keyframe editor */}
           <div
-            className="flex items-center px-3 border-b border-border flex-shrink-0"
+            className="flex items-center justify-between px-3 border-b border-border flex-shrink-0"
             style={{ height: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderHeight }}
           >
             <span className="text-sm font-medium text-foreground">
               {categories.find((c) => c.id === activeTab)?.label}
             </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="shrink-0"
+              style={{ width: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize, height: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize }}
+              onClick={toggleMediaFullColumn}
+              data-tooltip={mediaFullColumn ? 'Dock to preview' : 'Expand full column'}
+              data-tooltip-side="bottom"
+            >
+              {mediaFullColumn ? (
+                <ChevronUp className="w-3 h-3" />
+              ) : (
+                <ChevronDown className="w-3 h-3" />
+              )}
+            </Button>
           </div>
 
           {/* Media Tab - Full Media Library */}
-          <div className={`flex-1 overflow-hidden ${activeTab === 'media' ? 'block' : 'hidden'}`}>
+          <div className={`min-h-0 flex-1 overflow-hidden ${activeTab === 'media' ? 'block' : 'hidden'}`}>
             <MediaLibrary />
           </div>
 
           {/* Text Tab */}
-          <div className={`flex-1 overflow-y-auto p-3 ${activeTab === 'text' ? 'block' : 'hidden'}`}>
+          <div className={`min-h-0 flex-1 overflow-y-auto p-3 ${activeTab === 'text' ? 'block' : 'hidden'}`}>
             <div className="space-y-3">
               <button
-                onClick={handleAddText}
+                draggable={true}
+                onDragStart={handleTemplateDragStart({ itemType: 'text', label: 'Text' })}
+                onDragEnd={handleTemplateDragEnd}
+                onClick={() => {
+                  if (shouldSuppressGeneratedItemClick()) return;
+                  handleAddText();
+                }}
                 className="w-full flex items-center gap-3 p-3 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
               >
                 <div className="w-9 h-9 rounded-md bg-timeline-text/20 border border-timeline-text/50 flex items-center justify-center group-hover:bg-timeline-text/30 flex-shrink-0">
@@ -453,10 +512,16 @@ export const MediaSidebar = memo(function MediaSidebar() {
           </div>
 
           {/* Shapes Tab */}
-          <div className={`flex-1 overflow-y-auto p-3 ${activeTab === 'shapes' ? 'block' : 'hidden'}`}>
+          <div className={`min-h-0 flex-1 overflow-y-auto p-3 ${activeTab === 'shapes' ? 'block' : 'hidden'}`}>
             <div className="grid grid-cols-3 gap-1.5">
                   <button
-                    onClick={() => handleAddShape('rectangle')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Rectangle', shapeType: 'rectangle' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('rectangle');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -468,7 +533,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   </button>
 
                   <button
-                    onClick={() => handleAddShape('circle')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Circle', shapeType: 'circle' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('circle');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -480,7 +551,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   </button>
 
                   <button
-                    onClick={() => handleAddShape('triangle')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Triangle', shapeType: 'triangle' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('triangle');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -492,7 +569,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   </button>
 
                   <button
-                    onClick={() => handleAddShape('ellipse')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Ellipse', shapeType: 'ellipse' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('ellipse');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -504,7 +587,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   </button>
 
                   <button
-                    onClick={() => handleAddShape('star')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Star', shapeType: 'star' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('star');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -516,7 +605,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   </button>
 
                   <button
-                    onClick={() => handleAddShape('polygon')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Polygon', shapeType: 'polygon' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('polygon');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -528,7 +623,13 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   </button>
 
                   <button
-                    onClick={() => handleAddShape('heart')}
+                    draggable={true}
+                    onDragStart={handleTemplateDragStart({ itemType: 'shape', label: 'Heart', shapeType: 'heart' })}
+                    onDragEnd={handleTemplateDragEnd}
+                    onClick={() => {
+                      if (shouldSuppressGeneratedItemClick()) return;
+                      handleAddShape('heart');
+                    }}
                     className="flex flex-col items-center justify-center gap-1 p-2 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                   >
                     <div className="w-7 h-7 rounded border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70">
@@ -555,11 +656,17 @@ export const MediaSidebar = memo(function MediaSidebar() {
           </div>
 
           {/* Effects Tab */}
-          <div className={`flex-1 overflow-y-auto p-3 ${activeTab === 'effects' ? 'block' : 'hidden'}`}>
+          <div className={`min-h-0 flex-1 overflow-y-auto p-3 ${activeTab === 'effects' ? 'block' : 'hidden'}`}>
             <div className="space-y-3">
               {/* Blank Adjustment Layer */}
               <button
-                onClick={() => handleAddAdjustmentLayer()}
+                draggable={true}
+                onDragStart={handleTemplateDragStart({ itemType: 'adjustment', label: 'Adjustment Layer' })}
+                onDragEnd={handleTemplateDragEnd}
+                onClick={() => {
+                  if (shouldSuppressGeneratedItemClick()) return;
+                  handleAddAdjustmentLayer();
+                }}
                 className="w-full flex items-center gap-3 p-2.5 rounded-lg border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
               >
                 <div className="w-8 h-8 rounded-md border border-border bg-secondary/50 flex items-center justify-center group-hover:bg-secondary/70 flex-shrink-0">
@@ -581,13 +688,24 @@ export const MediaSidebar = memo(function MediaSidebar() {
                   {EFFECT_PRESETS.map((preset) => (
                     <button
                       key={preset.id}
-                      onClick={() => handleAddPreset(preset.id)}
+                      draggable={true}
+                      onDragStart={handleTemplateDragStart({
+                        itemType: 'adjustment',
+                        label: preset.name,
+                        effects: preset.effects,
+                      })}
+                      onDragEnd={handleTemplateDragEnd}
+                      onClick={() => {
+                        if (shouldSuppressGeneratedItemClick()) return;
+                        handleAddPreset(preset.id);
+                      }}
                       className="flex flex-col items-center gap-1 p-1.5 rounded-md border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                     >
                       {effectPreviews.has(`preset:${preset.id}`) ? (
                         <img
                           src={effectPreviews.get(`preset:${preset.id}`)}
                           alt=""
+                          draggable={false}
                           className="w-full aspect-video rounded-sm object-cover"
                         />
                       ) : (
@@ -613,13 +731,28 @@ export const MediaSidebar = memo(function MediaSidebar() {
                     {catEffects.map((def) => (
                       <button
                         key={def.id}
-                        onClick={() => handleAddGpuEffect(def.id)}
+                        draggable={true}
+                        onDragStart={handleTemplateDragStart({
+                          itemType: 'adjustment',
+                          label: def.name,
+                          effects: [{
+                            type: 'gpu-effect',
+                            gpuEffectType: def.id,
+                            params: getGpuEffectDefaultParams(def.id),
+                          }],
+                        })}
+                        onDragEnd={handleTemplateDragEnd}
+                        onClick={() => {
+                          if (shouldSuppressGeneratedItemClick()) return;
+                          handleAddGpuEffect(def.id);
+                        }}
                         className="flex flex-col items-center gap-1 p-1.5 rounded-md border border-border bg-secondary/30 hover:bg-secondary/50 hover:border-primary/50 transition-colors group"
                       >
                         {effectPreviews.has(def.id) ? (
                           <img
                             src={effectPreviews.get(def.id)}
                             alt=""
+                            draggable={false}
                             className="w-full aspect-video rounded-sm object-cover"
                           />
                         ) : (
@@ -637,14 +770,20 @@ export const MediaSidebar = memo(function MediaSidebar() {
           </div>
 
           {/* Transitions Tab */}
-          <div className={`flex-1 overflow-hidden ${activeTab === 'transitions' ? 'block' : 'hidden'}`}>
+          <div className={`min-h-0 flex-1 overflow-hidden ${activeTab === 'transitions' ? 'block' : 'hidden'}`}>
             <TransitionsPanel />
+          </div>
+
+          {/* AI Tab */}
+          <div className={`min-h-0 flex-1 overflow-hidden ${activeTab === 'ai' ? 'block' : 'hidden'}`}>
+            <AiPanel />
           </div>
           </div>
         </Activity>
         {/* Resize Handle */}
         {leftSidebarOpen && (
           <div
+            data-resize-handle
             onMouseDown={handleResizeStart}
             className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-primary/50 active:bg-primary/50 transition-colors z-10"
           />

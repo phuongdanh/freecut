@@ -15,6 +15,11 @@ export interface TimelineMediaPlacement {
   durationInFrames: number;
 }
 
+export interface TimelineLinkedMediaPlacement {
+  primary: TimelineMediaPlacement;
+  linkedAudio?: TimelineMediaPlacement;
+}
+
 interface TimelineBaseItem {
   id: string;
   trackId: string;
@@ -23,6 +28,7 @@ interface TimelineBaseItem {
   label: string;
   mediaId: string;
   originId: string;
+  linkedGroupId?: string;
   sourceStart: number;
   sourceEnd: number;
   sourceDuration: number;
@@ -50,8 +56,10 @@ function buildTimelineBaseItem(params: {
   label: string;
   timelineFps: number;
   placement: TimelineMediaPlacement;
+  originId?: string;
+  linkedGroupId?: string;
 }): TimelineBaseItem {
-  const { media, mediaId, label, timelineFps, placement } = params;
+  const { media, mediaId, label, timelineFps, placement, originId, linkedGroupId } = params;
   const sourceFps = media.fps || timelineFps;
   const actualSourceDurationFrames = Math.round(media.duration * sourceFps);
   const sourceFramesForItemDuration = Math.min(
@@ -66,7 +74,8 @@ function buildTimelineBaseItem(params: {
     durationInFrames: placement.durationInFrames,
     label,
     mediaId,
-    originId: crypto.randomUUID(),
+    originId: originId ?? crypto.randomUUID(),
+    linkedGroupId,
     sourceStart: 0,
     sourceEnd: sourceFramesForItemDuration,
     sourceDuration: actualSourceDurationFrames,
@@ -87,6 +96,8 @@ export function buildDroppedMediaTimelineItem(params: {
   canvasWidth: number;
   canvasHeight: number;
   placement: TimelineMediaPlacement;
+  originId?: string;
+  linkedGroupId?: string;
 }): TimelineItem {
   const {
     media,
@@ -99,6 +110,8 @@ export function buildDroppedMediaTimelineItem(params: {
     canvasWidth,
     canvasHeight,
     placement,
+    originId,
+    linkedGroupId,
   } = params;
   const baseItem = buildTimelineBaseItem({
     media,
@@ -106,6 +119,8 @@ export function buildDroppedMediaTimelineItem(params: {
     label,
     timelineFps,
     placement,
+    originId,
+    linkedGroupId,
   });
 
   if (mediaType === 'audio') {
@@ -146,4 +161,70 @@ export function buildDroppedMediaTimelineItem(params: {
     sourceHeight: media.height || undefined,
     transform,
   } as ImageItem;
+}
+
+export function buildDroppedMediaTimelineItems(params: {
+  media: MediaMetadata;
+  mediaId: string;
+  mediaType: DroppableMediaType;
+  label: string;
+  timelineFps: number;
+  blobUrl: string;
+  thumbnailUrl?: string | null;
+  canvasWidth: number;
+  canvasHeight: number;
+  placement: TimelineLinkedMediaPlacement;
+  linkVideoAudio?: boolean;
+}): TimelineItem[] {
+  const {
+    media,
+    mediaId,
+    mediaType,
+    label,
+    timelineFps,
+    blobUrl,
+    thumbnailUrl,
+    canvasWidth,
+    canvasHeight,
+    placement,
+    linkVideoAudio = false,
+  } = params;
+
+  const originId = crypto.randomUUID();
+  const linkedGroupId = mediaType === 'video' && linkVideoAudio ? crypto.randomUUID() : undefined;
+  const primaryItem = buildDroppedMediaTimelineItem({
+    media,
+    mediaId,
+    mediaType,
+    label,
+    timelineFps,
+    blobUrl,
+    thumbnailUrl,
+    canvasWidth,
+    canvasHeight,
+    placement: placement.primary,
+    originId,
+    linkedGroupId,
+  });
+
+  if (mediaType !== 'video' || !linkVideoAudio || !placement.linkedAudio) {
+    return [primaryItem];
+  }
+
+  const linkedAudio = buildDroppedMediaTimelineItem({
+    media,
+    mediaId,
+    mediaType: 'audio',
+    label,
+    timelineFps,
+    blobUrl,
+    thumbnailUrl: null,
+    canvasWidth,
+    canvasHeight,
+    placement: placement.linkedAudio,
+    originId,
+    linkedGroupId,
+  });
+
+  return [primaryItem, linkedAudio];
 }

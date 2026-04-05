@@ -3,39 +3,11 @@ import type { TimelineTrack } from '@/types/timeline';
 import { useTimelineStore } from '../stores/timeline-store';
 import { useSelectionStore } from '@/shared/state/selection';
 import { DRAG_THRESHOLD_PIXELS } from '../constants';
-import { getVisibleTracks } from '../utils/group-utils';
-
-/**
- * Determine the parent group for a gap between visible tracks.
- * At group boundaries (tracks above/below have different parents),
- * uses cursor position to decide: above the gap line → stay in the group,
- * below → use the other side's context.
- */
-function resolveGapParent(
-  visibleTracks: TimelineTrack[],
-  cumulativeHeights: number[],
-  gapIndex: number,
-  cursorCenterY: number
-): string | undefined {
-  if (gapIndex <= 0) return undefined; // Before first track → top-level
-
-  const trackAbove = visibleTracks[gapIndex - 1];
-  const trackBelow = gapIndex < visibleTracks.length ? visibleTracks[gapIndex] : undefined;
-
-  const aboveCtx = trackAbove?.isGroup ? trackAbove.id : trackAbove?.parentTrackId;
-  const belowCtx = trackBelow?.parentTrackId;
-
-  // Same context on both sides (or no track below) → use it
-  if (aboveCtx === belowCtx) return aboveCtx;
-  if (!trackBelow) return aboveCtx;
-
-  // Different contexts → boundary. Use cursor position to pick a side.
-  const gapY = cumulativeHeights[gapIndex];
-  if (gapY !== undefined && cursorCenterY < gapY) {
-    return aboveCtx; // Cursor above gap → stay with above's group
-  }
-  return belowCtx; // Cursor at/below gap → use below's context
-}
+import {
+  buildTrackContentCreateTrackMovePlan,
+  buildTrackContentMoveUpdates,
+  resolveTrackContentDragPlan,
+} from '../utils/track-content-drag';
 
 // Shared ref for drag offset (avoids re-renders from store updates)
 export const trackDragOffsetRef = { current: 0 };
@@ -46,16 +18,12 @@ export const trackDragJustDroppedRef = { current: false };
 // Shared ref for drop index indicator (gap between visible tracks)
 export const trackDropIndexRef = { current: -1 };
 
-// Shared ref for drop-on-group target (group track ID, empty if not targeting a group)
-export const trackDropGroupIdRef = { current: '' };
-
-// Shared ref for the parent group implied by the current gap position (empty = top-level)
-export const trackDropParentIdRef = { current: '' };
-
 interface DragState {
   trackId: string; // Anchor track
   startMouseY: number;
   currentMouseY: number;
+  kind: 'video' | 'audio';
+  sectionTrackIds: string[];
   draggedTracks: Array<{
     id: string;
   }>;
@@ -69,10 +37,10 @@ interface UseTrackDragReturn {
 }
 
 /**
- * Track drag-and-drop hook for vertical reordering
+ * Track drag-and-drop hook for moving track contents within fixed lanes
  *
- * Follows the same pattern as use-timeline-drag but for vertical track reordering.
- * Supports multi-track selection and drag, group drop targets, and parent context.
+ * Keeps V/A lane indexes fixed and remaps clip contents inside the dragged section.
+ * Supports multi-track selection and drag.
  *
  * @param track - The track to make draggable
  */
@@ -84,7 +52,9 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
 
   // Get store state with granular selectors
   const tracks = useTimelineStore((s) => s.tracks);
-  const setTracks = useTimelineStore((s) => s.setTracks);
+  const items = useTimelineStore((s) => s.items);
+  const moveItems = useTimelineStore((s) => s.moveItems);
+  const moveItemsWithTrackChanges = useTimelineStore((s) => s.moveItemsWithTrackChanges);
 
   // Selection store
   const selectedTrackIds = useSelectionStore((s) => s.selectedTrackIds);
@@ -93,15 +63,39 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
 
   // Create stable refs to avoid stale closures
   const tracksRef = useRef(tracks);
+  const itemsRef = useRef(items);
   const selectedTrackIdsRef = useRef(selectedTrackIds);
-  const setTracksRef = useRef(setTracks);
+  const moveItemsRef = useRef(moveItems);
+  const moveItemsWithTrackChangesRef = useRef(moveItemsWithTrackChanges);
 
   // Update refs when dependencies change
   useEffect(() => {
     tracksRef.current = tracks;
+    itemsRef.current = items;
     selectedTrackIdsRef.current = selectedTrackIds;
-    setTracksRef.current = setTracks;
-  }, [tracks, selectedTrackIds, setTracks]);
+    moveItemsRef.current = moveItems;
+    moveItemsWithTrackChangesRef.current = moveItemsWithTrackChanges;
+  }, [items, moveItems, moveItemsWithTrackChanges, tracks, selectedTrackIds]);
+
+  const getCreateNewZoneAtMouseY = useCallback((mouseY: number): 'video' | 'audio' | null => {
+    const videoZone = document.querySelector<HTMLElement>('[data-track-header-new-zone="video"]');
+    if (videoZone) {
+      const rect = videoZone.getBoundingClientRect();
+      if (mouseY >= rect.top && mouseY <= rect.bottom) {
+        return 'video';
+      }
+    }
+
+    const audioZone = document.querySelector<HTMLElement>('[data-track-header-new-zone="audio"]');
+    if (audioZone) {
+      const rect = audioZone.getBoundingClientRect();
+      if (mouseY >= rect.top && mouseY <= rect.bottom) {
+        return 'audio';
+      }
+    }
+
+    return null;
+  }, []);
 
   /**
    * Handle mouse down - start dragging
@@ -133,27 +127,20 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
       }
 
       // Determine which tracks to drag
-      let tracksToDrag = isInSelection ? [...currentSelectedIds] : [track.id];
+      const tracksToDrag = isInSelection ? [...currentSelectedIds] : [track.id];
       const allTracks = tracksRef.current;
+      const dragPlan = resolveTrackContentDragPlan({
+        tracks: allTracks,
+        anchorTrackId: track.id,
+        selectedTrackIds: tracksToDrag,
+      });
 
-      // If dragging a group, include its children in the drag set
-      const additionalIds: string[] = [];
-      for (const id of tracksToDrag) {
-        const t = allTracks.find((tr) => tr.id === id);
-        if (t?.isGroup) {
-          for (const child of allTracks) {
-            if (child.parentTrackId === id && !tracksToDrag.includes(child.id)) {
-              additionalIds.push(child.id);
-            }
-          }
-        }
-      }
-      if (additionalIds.length > 0) {
-        tracksToDrag = [...new Set([...tracksToDrag, ...additionalIds])];
+      if (!dragPlan) {
+        return;
       }
 
       // Store initial state for all dragged tracks
-      const draggedTracks = tracksToDrag
+      const draggedTracks = dragPlan.draggedTrackIds
         .map((id) => {
           const trackIndex = allTracks.findIndex((t) => t.id === id);
           if (trackIndex === -1) return null;
@@ -166,6 +153,8 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
         trackId: track.id,
         startMouseY: e.clientY,
         currentMouseY: e.clientY,
+        kind: dragPlan.kind,
+        sectionTrackIds: dragPlan.sectionTrackIds,
         draggedTracks,
       };
 
@@ -223,8 +212,6 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
       setDragState(null);
       trackDragOffsetRef.current = 0;
       trackDropIndexRef.current = -1;
-      trackDropGroupIdRef.current = '';
-      trackDropParentIdRef.current = '';
       dragStateRef.current = null;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
@@ -241,18 +228,24 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
       // Update shared ref for other tracks to read (no re-renders)
       trackDragOffsetRef.current = deltaY;
 
-      // Use visible tracks for position calculation (matches what the user sees)
       const allTracks = tracksRef.current;
-      const visibleTracks = getVisibleTracks(allTracks);
+      const sectionTrackIds = dragStateRef.current.sectionTrackIds;
+      const visibleTracks = sectionTrackIds
+        .map((trackId) => allTracks.find((track) => track.id === trackId))
+        .filter((track): track is TimelineTrack => track !== undefined);
+      const createNewZone = getCreateNewZoneAtMouseY(e.clientY);
 
       if (visibleTracks.length > 0 && dragStateRef.current) {
-        const draggedIdsSet = new Set(dragStateRef.current.draggedTracks.map((t) => t.id));
-
-        // Check if any dragged track is a group (can't drop groups into other groups)
-        const hasDraggedGroup = dragStateRef.current.draggedTracks.some((dt) => {
-          const t = allTracks.find((tr) => tr.id === dt.id);
-          return t?.isGroup;
-        });
+        const sectionStartIndex = allTracks.findIndex((track) => track.id === visibleTracks[0]?.id);
+        if (sectionStartIndex !== -1 && createNewZone === dragStateRef.current.kind) {
+          const absoluteDropIndex = createNewZone === 'video'
+            ? sectionStartIndex
+            : sectionStartIndex + visibleTracks.length;
+          setDropIndex(absoluteDropIndex);
+          trackDropIndexRef.current = absoluteDropIndex;
+          dragStateRef.current.currentMouseY = e.clientY;
+          return;
+        }
 
         // Calculate cumulative heights for each visible track boundary
         const cumulativeHeights: number[] = [0];
@@ -276,62 +269,27 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
           if (startTrackTop !== undefined && draggedTrack) {
             const currentCenterY = startTrackTop + draggedTrack.height / 2 + deltaY;
 
-            // Check if cursor center is over the middle zone of a group track.
-            // Only the inner 50% counts as "drop onto group" — the outer edges
-            // fall through to gap detection so users can reorder above/below.
-            let dropGroupId = '';
-            if (!hasDraggedGroup) {
-              for (let i = 0; i < visibleTracks.length; i++) {
-                const vt = visibleTracks[i];
-                const trackTop = cumulativeHeights[i];
-                const trackBottom = cumulativeHeights[i + 1];
-                if (
-                  vt?.isGroup &&
-                  !draggedIdsSet.has(vt.id) &&
-                  trackTop !== undefined &&
-                  trackBottom !== undefined
-                ) {
-                  const inset = (trackBottom - trackTop) * 0.25;
-                  if (currentCenterY >= trackTop + inset && currentCenterY < trackBottom - inset) {
-                    dropGroupId = vt.id;
-                    break;
-                  }
+            let closestIndex = 0;
+            let minDistance = Infinity;
+
+            for (let i = 0; i <= visibleTracks.length; i++) {
+              const gapY = cumulativeHeights[i];
+              if (gapY !== undefined) {
+                const distance = Math.abs(currentCenterY - gapY);
+                if (distance < minDistance) {
+                  minDistance = distance;
+                  closestIndex = i;
                 }
               }
             }
 
-            trackDropGroupIdRef.current = dropGroupId;
+            const sectionStartIndex = allTracks.findIndex((track) => track.id === visibleTracks[0]?.id);
+            const absoluteDropIndex = sectionStartIndex === -1
+              ? -1
+              : sectionStartIndex + closestIndex;
 
-            if (dropGroupId) {
-              // Over a group → suppress gap indicator
-              setDropIndex(-1);
-              trackDropIndexRef.current = -1;
-              trackDropParentIdRef.current = '';
-            } else {
-              // Find which gap the center is closest to
-              let closestIndex = 0;
-              let minDistance = Infinity;
-
-              for (let i = 0; i <= visibleTracks.length; i++) {
-                const gapY = cumulativeHeights[i];
-                if (gapY !== undefined) {
-                  const distance = Math.abs(currentCenterY - gapY);
-                  if (distance < minDistance) {
-                    minDistance = distance;
-                    closestIndex = i;
-                  }
-                }
-              }
-
-              // Determine parent context for this gap (matches handleMouseUp logic)
-              const gapParentId = resolveGapParent(
-                visibleTracks, cumulativeHeights, closestIndex, currentCenterY
-              );
-
-              setDropIndex(closestIndex);
-              trackDropIndexRef.current = closestIndex;
-              trackDropParentIdRef.current = gapParentId ?? '';
-            }
+            setDropIndex(absoluteDropIndex);
+            trackDropIndexRef.current = absoluteDropIndex;
           }
         }
       }
@@ -350,9 +308,11 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
       if (!dragStateRef.current || !isDragging) return;
 
       const dragState = dragStateRef.current;
-      const deltaY = dragState.currentMouseY - dragState.startMouseY;
       const allTracks = tracksRef.current;
-      const visibleTracks = getVisibleTracks(allTracks);
+      const visibleTracks = dragState.sectionTrackIds
+        .map((trackId) => allTracks.find((track) => track.id === trackId))
+        .filter((track): track is TimelineTrack => track !== undefined);
+      const createNewZone = getCreateNewZoneAtMouseY(dragState.currentMouseY);
 
       // Guard against empty tracks array
       if (allTracks.length === 0 || visibleTracks.length === 0) {
@@ -361,143 +321,67 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
       }
 
       const draggedIds = dragState.draggedTracks.map((t) => t.id);
-      const draggedIdsSet = new Set(draggedIds);
-      const dropGroupId = trackDropGroupIdRef.current;
+      const deltaY = dragState.currentMouseY - dragState.startMouseY;
+      // Calculate cumulative heights for visible tracks
+      const cumulativeHeights: number[] = [0];
+      for (let i = 0; i < visibleTracks.length; i++) {
+        const vt = visibleTracks[i];
+        const lastHeight = cumulativeHeights[cumulativeHeights.length - 1];
+        if (vt && lastHeight !== undefined) {
+          cumulativeHeights.push(lastHeight + vt.height);
+        }
+      }
 
-      if (dropGroupId) {
-        // --- Drop onto a group track: reparent and place after group's last child ---
-        const nonDraggedTracks = allTracks.filter((t) => !draggedIdsSet.has(t.id));
-        const draggedTracksData = draggedIds
-          .map((id) => allTracks.find((t) => t.id === id))
-          .filter((t): t is TimelineTrack => t !== undefined)
-          .map((t) => {
-            // Keep children of a dragged group with their parent
-            if (t.parentTrackId && draggedIdsSet.has(t.parentTrackId)) return t;
-            return { ...t, parentTrackId: dropGroupId };
-          });
+      // Find dragged track position in visible tracks
+      const startVisibleIndex = visibleTracks.findIndex((t) => t.id === dragState.trackId);
+      if (startVisibleIndex === -1) {
+        cleanup();
+        return;
+      }
 
-        if (draggedTracksData.length > 0) {
-          // Find insert position: after group header + all existing children
-          let insertIndex = nonDraggedTracks.findIndex((t) => t.id === dropGroupId);
-          if (insertIndex !== -1) {
-            insertIndex++; // After the group header
-            while (
-              insertIndex < nonDraggedTracks.length &&
-              nonDraggedTracks[insertIndex]?.parentTrackId === dropGroupId
-            ) {
-              insertIndex++;
+      const startTrackTop = cumulativeHeights[startVisibleIndex];
+      const draggedTrack = visibleTracks[startVisibleIndex];
+      let newVisibleIndex = startVisibleIndex;
+
+      if (startTrackTop !== undefined && draggedTrack) {
+        const currentCenterY = startTrackTop + draggedTrack.height / 2 + deltaY;
+
+        let closestIndex = 0;
+        let minDistance = Infinity;
+        for (let i = 0; i <= visibleTracks.length; i++) {
+          const gapY = cumulativeHeights[i];
+          if (gapY !== undefined) {
+            const distance = Math.abs(currentCenterY - gapY);
+            if (distance < minDistance) {
+              minDistance = distance;
+              closestIndex = i;
             }
-          } else {
-            insertIndex = nonDraggedTracks.length;
           }
+        }
+        newVisibleIndex = closestIndex;
+      }
 
-          const reorderedTracks = [
-            ...nonDraggedTracks.slice(0, insertIndex),
-            ...draggedTracksData,
-            ...nonDraggedTracks.slice(insertIndex),
-          ];
-          setTracksRef.current(reorderedTracks.map((t, i) => ({ ...t, order: i })));
+      if (createNewZone === dragState.kind) {
+        const createTrackPlan = buildTrackContentCreateTrackMovePlan({
+          tracks: allTracks,
+          items: itemsRef.current,
+          kind: dragState.kind,
+          draggedTrackIds: draggedIds,
+        });
+
+        if (createTrackPlan && createTrackPlan.updates.length > 0) {
+          moveItemsWithTrackChangesRef.current(createTrackPlan.tracks, createTrackPlan.updates);
         }
       } else {
-        // --- Gap drop: reorder with parent context ---
+        const updates = buildTrackContentMoveUpdates({
+          sectionTrackIds: dragState.sectionTrackIds,
+          draggedTrackIds: draggedIds,
+          items: itemsRef.current,
+          insertIndex: newVisibleIndex,
+        });
 
-        // Calculate cumulative heights for visible tracks
-        const cumulativeHeights: number[] = [0];
-        for (let i = 0; i < visibleTracks.length; i++) {
-          const vt = visibleTracks[i];
-          const lastHeight = cumulativeHeights[cumulativeHeights.length - 1];
-          if (vt && lastHeight !== undefined) {
-            cumulativeHeights.push(lastHeight + vt.height);
-          }
-        }
-
-        // Find dragged track position in visible tracks
-        const startVisibleIndex = visibleTracks.findIndex((t) => t.id === dragState.trackId);
-        if (startVisibleIndex === -1) {
-          cleanup();
-          return;
-        }
-
-        const startTrackTop = cumulativeHeights[startVisibleIndex];
-        const draggedTrack = visibleTracks[startVisibleIndex];
-        let newVisibleIndex = startVisibleIndex;
-
-        if (startTrackTop !== undefined && draggedTrack) {
-          const currentCenterY = startTrackTop + draggedTrack.height / 2 + deltaY;
-
-          // Find which gap the center is closest to
-          let closestIndex = 0;
-          let minDistance = Infinity;
-          for (let i = 0; i <= visibleTracks.length; i++) {
-            const gapY = cumulativeHeights[i];
-            if (gapY !== undefined) {
-              const distance = Math.abs(currentCenterY - gapY);
-              if (distance < minDistance) {
-                minDistance = distance;
-                closestIndex = i;
-              }
-            }
-          }
-          newVisibleIndex = closestIndex;
-        }
-
-        // Determine parent context from neighboring visible tracks at the gap
-        // Recalculate currentCenterY for handleMouseUp
-        const muStartTop = cumulativeHeights[startVisibleIndex];
-        const muDraggedTrack = visibleTracks[startVisibleIndex];
-        const muCenterY = (muStartTop !== undefined && muDraggedTrack)
-          ? muStartTop + muDraggedTrack.height / 2 + deltaY
-          : 0;
-        const newParentTrackId = resolveGapParent(
-          visibleTracks, cumulativeHeights, newVisibleIndex, muCenterY
-        );
-
-        // Map visible gap index → full array insert position
-        let fullInsertBeforeId: string | undefined;
-        if (newVisibleIndex < visibleTracks.length) {
-          fullInsertBeforeId = visibleTracks[newVisibleIndex]?.id;
-        }
-
-        let fullIndex: number;
-        if (fullInsertBeforeId) {
-          fullIndex = allTracks.findIndex((t) => t.id === fullInsertBeforeId);
-          if (fullIndex === -1) fullIndex = allTracks.length;
-        } else {
-          fullIndex = allTracks.length;
-        }
-
-        // Build reordered track list with updated parentTrackId
-        const nonDraggedTracks = allTracks.filter((t) => !draggedIdsSet.has(t.id));
-        const draggedTracksData = draggedIds
-          .map((id) => allTracks.find((t) => t.id === id))
-          .filter((t): t is TimelineTrack => t !== undefined)
-          .map((t) => {
-            // Don't reparent group tracks (nesting depth capped at 1)
-            if (t.isGroup) return t;
-            // Keep children of a dragged group with their parent
-            if (t.parentTrackId && draggedIdsSet.has(t.parentTrackId)) return t;
-            return { ...t, parentTrackId: newParentTrackId };
-          });
-
-        if (draggedTracksData.length > 0) {
-          // Calculate insert index in non-dragged array (adjust for removed tracks)
-          let insertIndex = fullIndex;
-          for (let i = 0; i < fullIndex && i < allTracks.length; i++) {
-            const t = allTracks[i];
-            if (t && draggedIdsSet.has(t.id)) {
-              insertIndex--;
-            }
-          }
-          insertIndex = Math.max(0, Math.min(insertIndex, nonDraggedTracks.length));
-
-          const reorderedTracks = [
-            ...nonDraggedTracks.slice(0, insertIndex),
-            ...draggedTracksData,
-            ...nonDraggedTracks.slice(insertIndex),
-          ];
-
-          // Update order property for all tracks
-          setTracksRef.current(reorderedTracks.map((t, i) => ({ ...t, order: i })));
+        if (updates.length > 0) {
+          moveItemsRef.current(updates);
         }
       }
 
@@ -520,7 +404,7 @@ export function useTrackDrag(track: TimelineTrack): UseTrackDragReturn {
         window.removeEventListener('keydown', handleKeyDown);
       };
     }
-  }, [isDragging, setDragState]);
+  }, [getCreateNewZoneAtMouseY, isDragging, setDragState]);
 
   return {
     isDragging,

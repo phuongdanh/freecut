@@ -1,9 +1,8 @@
 /**
- * Transition Actions - FCP-style overlap transition operations.
+ * Transition Actions - cut-centered handle-based transitions.
  *
- * When adding a transition, the right clip physically slides left to overlap
- * the left clip. Both clips have real source content during the overlap.
- * Removing a transition reverses this — the right clip slides back right.
+ * Transitions stay attached to the cut between adjacent clips. Adding,
+ * updating, or removing a transition never moves clip timeline positions.
  */
 
 import type {
@@ -14,33 +13,16 @@ import type {
   SlideDirection,
   FlipDirection,
 } from '@/types/transition';
+import { TRANSITION_CONFIGS } from '@/types/transition';
 import { useItemsStore } from '../items-store';
 import { useTransitionsStore } from '../transitions-store';
 import { useTimelineSettingsStore } from '../timeline-settings-store';
-import { canAddTransition } from '../../utils/transition-utils';
-import { execute, logger, applyTransitionRepairs } from './shared';
-
-/**
- * Ripple items after the given clip on the same track by a delta amount.
- * Only affects items whose `from` is strictly after the right clip's original `from`.
- */
-function rippleItemsAfter(
-  rightClipId: string,
-  rightClipFrom: number,
-  trackId: string,
-  delta: number
-): void {
-  const store = useItemsStore.getState();
-  const items = store.items;
-
-  for (const item of items) {
-    if (item.id === rightClipId) continue;
-    if (item.trackId !== trackId) continue;
-    if (item.from > rightClipFrom) {
-      store._updateItem(item.id, { from: item.from + delta });
-    }
-  }
-}
+import {
+  canAddTransition,
+  areFramesAligned,
+  getMaxTransitionDurationForHandles,
+} from '../../utils/transition-utils';
+import { execute, getLogger } from './shared';
 
 export function addTransition(
   leftClipId: string,
@@ -53,31 +35,40 @@ export function addTransition(
   return execute('ADD_TRANSITION', () => {
     const items = useItemsStore.getState().items;
     const transitions = useTransitionsStore.getState().transitions;
-    const fps = useTimelineSettingsStore.getState().fps;
-
     // Find the clips
     const leftClip = items.find((i) => i.id === leftClipId);
     const rightClip = items.find((i) => i.id === rightClipId);
 
     if (!leftClip || !rightClip) {
-      logger.warn('[addTransition] Clips not found');
+      getLogger().warn('[addTransition] Clips not found');
       return false;
     }
 
     const maxByClipDuration = Math.floor(Math.min(leftClip.durationInFrames, rightClip.durationInFrames) - 1);
     if (maxByClipDuration < 1) {
-      logger.warn('[addTransition] Cannot add transition: clips are too short');
+      getLogger().warn('[addTransition] Cannot add transition: clips are too short');
       return false;
     }
 
-    // Default duration is 1 second (fps frames), but clamp to what both clips can support.
-    const requestedDuration = durationInFrames ?? fps;
-    const duration = Math.max(1, Math.min(Math.round(requestedDuration), maxByClipDuration));
+    const config = TRANSITION_CONFIGS[type];
+    const requestedDuration = durationInFrames ?? config.defaultDuration;
+    let duration = Math.max(1, Math.min(Math.round(requestedDuration), maxByClipDuration));
+
+    const leftEnd = leftClip.from + leftClip.durationInFrames;
+    const isAdjacent = areFramesAligned(leftEnd, rightClip.from);
+    if (isAdjacent) {
+      const maxHandleDuration = getMaxTransitionDurationForHandles(leftClip, rightClip, 0.5);
+      if (maxHandleDuration < 1) {
+        getLogger().warn('[addTransition] Cannot add transition: insufficient source handle at cut');
+        return false;
+      }
+      duration = Math.min(duration, maxHandleDuration);
+    }
 
     // Validate that transition can be added (includes handle check)
-    const validation = canAddTransition(leftClip, rightClip, duration);
+    const validation = canAddTransition(leftClip, rightClip, duration, 0.5);
     if (!validation.canAdd) {
-      logger.warn('[addTransition] Cannot add transition:', validation.reason);
+      getLogger().warn('[addTransition] Cannot add transition:', validation.reason);
       return false;
     }
 
@@ -86,21 +77,9 @@ export function addTransition(
       (t) => t.leftClipId === leftClipId && t.rightClipId === rightClipId
     );
     if (existingTransition) {
-      logger.warn('[addTransition] Transition already exists between these clips');
+      getLogger().warn('[addTransition] Transition already exists between these clips');
       return false;
     }
-
-    // FCP-style overlap: slide right clip left by transition duration
-    const originalRightFrom = rightClip.from;
-
-    // Update right clip: slide left (sourceStart stays unchanged — the first D
-    // source frames become the transition-in region)
-    useItemsStore.getState()._updateItem(rightClipId, {
-      from: rightClip.from - duration,
-    });
-
-    // Ripple all items after right clip on the same track left by duration
-    rippleItemsAfter(rightClipId, originalRightFrom, rightClip.trackId, -duration);
 
     // Create transition record
     useTransitionsStore.getState()._addTransition(
@@ -112,9 +91,6 @@ export function addTransition(
       presentation,
       direction
     );
-
-    // Repair any affected transitions
-    applyTransitionRepairs([leftClipId, rightClipId]);
 
     useTimelineSettingsStore.getState().markDirty();
     return true;
@@ -129,39 +105,21 @@ export function updateTransition(
     const transitions = useTransitionsStore.getState().transitions;
     const transition = transitions.find((t) => t.id === id);
     if (!transition) return;
+    const items = useItemsStore.getState().items;
+    const leftClip = items.find((i) => i.id === transition.leftClipId);
+    const rightClip = items.find((i) => i.id === transition.rightClipId);
+    const nextTransition = { ...transition, ...updates };
 
-    // If duration is changing, adjust clip overlap
-    if (updates.durationInFrames !== undefined && updates.durationInFrames !== transition.durationInFrames) {
-      const items = useItemsStore.getState().items;
-      const rightClip = items.find((i) => i.id === transition.rightClipId);
-
-      if (rightClip) {
-        const oldDuration = transition.durationInFrames;
-        const newDuration = updates.durationInFrames;
-        const delta = newDuration - oldDuration;
-
-        // Validate constraints when increasing duration
-        if (delta > 0) {
-          const leftClip = items.find((i) => i.id === transition.leftClipId);
-          if (leftClip) {
-            // Check clip duration constraint
-            const maxByClipDuration = Math.min(leftClip.durationInFrames, rightClip.durationInFrames) - 1;
-            if (newDuration > maxByClipDuration) {
-              logger.warn('[updateTransition] Duration exceeds clip bounds');
-              return;
-            }
-          }
-        }
-
-        const originalRightFrom = rightClip.from;
-
-        // Adjust right clip: slide by delta (sourceStart unchanged)
-        useItemsStore.getState()._updateItem(transition.rightClipId, {
-          from: rightClip.from - delta,
-        });
-
-        // Ripple subsequent items
-        rippleItemsAfter(transition.rightClipId, originalRightFrom, rightClip.trackId, -delta);
+    if (leftClip && rightClip) {
+      const validation = canAddTransition(
+        leftClip,
+        rightClip,
+        nextTransition.durationInFrames,
+        nextTransition.alignment,
+      );
+      if (!validation.canAdd) {
+        getLogger().warn('[updateTransition] Cannot update transition:', validation.reason);
+        return;
       }
     }
 
@@ -201,27 +159,6 @@ export function updateTransitions(
 
 export function removeTransition(id: string): void {
   execute('REMOVE_TRANSITION', () => {
-    const transitions = useTransitionsStore.getState().transitions;
-    const transition = transitions.find((t) => t.id === id);
-
-    if (transition) {
-      const items = useItemsStore.getState().items;
-      const rightClip = items.find((i) => i.id === transition.rightClipId);
-
-      if (rightClip) {
-        const duration = transition.durationInFrames;
-        const originalRightFrom = rightClip.from;
-
-        // Reverse the overlap: slide right clip back right (sourceStart unchanged)
-        useItemsStore.getState()._updateItem(transition.rightClipId, {
-          from: rightClip.from + duration,
-        });
-
-        // Ripple subsequent items back right
-        rippleItemsAfter(transition.rightClipId, originalRightFrom, rightClip.trackId, duration);
-      }
-    }
-
     useTransitionsStore.getState()._removeTransition(id);
     useTimelineSettingsStore.getState().markDirty();
   }, { id });

@@ -6,10 +6,6 @@ import { useTimelineStore } from '@/features/editor/deps/timeline-store';
 import type { AudioItem, VideoItem } from '@/types/timeline';
 import { ClipPanel } from './index';
 
-vi.mock('./source-section', () => ({
-  SourceSection: () => <div>Source Section</div>,
-}));
-
 vi.mock('./layout-section', () => ({
   LayoutSection: () => <div>Layout Body</div>,
 }));
@@ -68,7 +64,7 @@ const AUDIO_ITEM: AudioItem = {
   mediaId: 'media-audio-1',
 };
 
-function activateTab(name: 'Effects' | 'Media' | 'Transform') {
+function activateTab(name: 'Audio' | 'Effects' | 'Video') {
   const tab = screen.getByRole('tab', { name });
   fireEvent.mouseDown(tab, { button: 0, ctrlKey: false });
   fireEvent.focus(tab);
@@ -76,7 +72,8 @@ function activateTab(name: 'Effects' | 'Media' | 'Transform') {
 
 function resetStores(items: Array<VideoItem | AudioItem>, selectedItemIds: string[]) {
   useEditorStore.setState({
-    clipInspectorTab: 'transform',
+    clipInspectorTab: 'video',
+    linkedSelectionEnabled: true,
   });
 
   useSelectionStore.setState({
@@ -133,7 +130,7 @@ describe('ClipPanel inspector tabs', () => {
   });
 
   it('falls back to the first valid tab and updates the remembered tab', async () => {
-    useEditorStore.getState().setClipInspectorTab('transform');
+    useEditorStore.getState().setClipInspectorTab('video');
     resetStores([AUDIO_ITEM], [AUDIO_ITEM.id]);
 
     render(<ClipPanel />);
@@ -141,7 +138,7 @@ describe('ClipPanel inspector tabs', () => {
     await waitFor(() => {
       expect(screen.getByText('Audio Body')).toBeInTheDocument();
     });
-    expect(screen.getByRole('tab', { name: 'Media' })).toHaveAttribute('data-state', 'active');
-    expect(useEditorStore.getState().clipInspectorTab).toBe('media');
+    expect(screen.getByRole('tab', { name: 'Audio' })).toHaveAttribute('data-state', 'active');
+    expect(useEditorStore.getState().clipInspectorTab).toBe('audio');
   });
 });

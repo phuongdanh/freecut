@@ -1,5 +1,9 @@
 ﻿import { useRef, useEffect, useLayoutEffect, useState, useMemo, useCallback, memo } from 'react';
-import { backgroundPreseek as workerBackgroundPreseek } from '../utils/decoder-prewarm';
+import {
+  backgroundPreseek as workerBackgroundPreseek,
+  backgroundBatchPreseek as workerBackgroundBatchPreseek,
+  getDecoderPrewarmMetricsSnapshot,
+} from '../utils/decoder-prewarm';
 import { Player, type PlayerRef } from '@/features/preview/deps/player-core';
 import type { CaptureOptions, PreviewQuality } from '@/shared/state/playback';
 import { usePlaybackStore } from '@/shared/state/playback';
@@ -69,11 +73,15 @@ import {
   updateAdaptivePreviewQuality,
 } from '../utils/adaptive-preview-quality';
 import { shouldPreferPlayerForStyledTextScrub as shouldPreferPlayerForStyledTextScrubGuard } from '../utils/text-render-guard';
-import { useGpuEffectsOverlay } from '../hooks/use-gpu-effects-overlay';
+import {
+  shouldForceContinuousPreviewOverlay,
+  useGpuEffectsOverlay,
+} from '../hooks/use-gpu-effects-overlay';
 import { useCustomPlayer } from '../hooks/use-custom-player';
-import { getBestDomVideoElementForItem } from '@/features/preview/deps/composition-runtime';
+import { getBestDomVideoElementForItem, transitionSafePlay } from '@/features/preview/deps/composition-runtime';
 import { createLogger, createOperationId, type WideEvent } from '@/shared/logging/logger';
 import { EDITOR_LAYOUT_CSS_VALUES } from '@/shared/ui/editor-layout';
+import { isFrameInRanges } from '@/shared/utils/frame-invalidation';
 
 // DEV-only: cached reference loaded via dynamic import so the module
 // is excluded from production bundles entirely.
@@ -147,6 +155,7 @@ import {
   parsePreviewPerfPanelQuery,
   blobToDataUrl,
 } from '../utils/preview-constants';
+import { collectVisualInvalidationRanges } from '../utils/preview-frame-invalidation';
 
 const logger = createLogger('VideoPreview');
 
@@ -226,6 +235,7 @@ export const VideoPreview = memo(function VideoPreview({
   const scrubPreloadPromiseRef = useRef<Promise<void> | null>(null);
   const scrubOffscreenCanvasRef = useRef<OffscreenCanvas | null>(null);
   const scrubOffscreenCtxRef = useRef<OffscreenCanvasRenderingContext2D | null>(null);
+  const scrubRendererStructureKeyRef = useRef<string | null>(null);
   const scrubRenderInFlightRef = useRef(false);
   const scrubRenderGenerationRef = useRef(0);
   const scrubRequestedFrameRef = useRef<number | null>(null);
@@ -234,6 +244,7 @@ export const VideoPreview = memo(function VideoPreview({
   // with the rAF pump's render loop (different canvas, different decoders).
   const bgTransitionRendererRef = useRef<CompositionRenderer | null>(null);
   const bgTransitionInitPromiseRef = useRef<Promise<CompositionRenderer | null> | null>(null);
+  const bgTransitionRendererStructureKeyRef = useRef<string | null>(null);
   const bgTransitionRenderInFlightRef = useRef(false);
   const scrubPrewarmQueueRef = useRef<number[]>([]);
   const scrubPrewarmQueuedSetRef = useRef<Set<number>>(new Set());
@@ -249,7 +260,10 @@ export const VideoPreview = memo(function VideoPreview({
   const transitionPrepareTimeoutRef = useRef<number | null>(null);
   const transitionSessionWindowRef = useRef<ResolvedTransitionWindow<TimelineItem> | null>(null);
   const transitionSessionPinnedElementsRef = useRef<Map<string, HTMLVideoElement | null>>(new Map());
+  const transitionExitElementsRef = useRef<Map<string, HTMLVideoElement | null>>(new Map());
+  const transitionSessionStallCountRef = useRef<Map<string, { ct: number; count: number }>>(new Map());
   const transitionSessionBufferedFramesRef = useRef<Map<number, OffscreenCanvas>>(new Map());
+  const transitionPrewarmPromiseRef = useRef<Promise<void> | null>(null);
   const captureCanvasSourceInFlightRef = useRef<Promise<OffscreenCanvas | HTMLCanvasElement | null> | null>(null);
   const captureInFlightRef = useRef<Promise<string | null> | null>(null);
   const captureImageDataInFlightRef = useRef<Promise<ImageData | null> | null>(null);
@@ -355,7 +369,6 @@ export const VideoPreview = memo(function VideoPreview({
       : null,
     [activeGizmoItemId, items]
   );
-
   const isGizmoInteractingRef = useRef(isGizmoInteracting);
   isGizmoInteractingRef.current = isGizmoInteracting;
   const preferPlayerForTextGizmoRef = useRef(false);
@@ -1256,6 +1269,7 @@ export const VideoPreview = memo(function VideoPreview({
       const pendingSeekAgeMs = pendingSeekLatencyRef.current
         ? Math.max(0, seekNow - pendingSeekLatencyRef.current.startedAtMs)
         : 0;
+      const preseekMetrics = getDecoderPrewarmMetricsSnapshot();
       const snapshot: PreviewPerfSnapshot = {
         ts: Date.now(),
         unresolvedQueue: unresolvedMediaIdsRef.current.length,
@@ -1288,6 +1302,17 @@ export const VideoPreview = memo(function VideoPreview({
         sourcePoolActiveClips: stats.sourcePoolActiveClips,
         fastScrubPrewarmedSources: stats.fastScrubPrewarmedSources,
         fastScrubPrewarmSourceEvictions: stats.fastScrubPrewarmSourceEvictions,
+        preseekRequests: preseekMetrics.requests,
+        preseekCacheHits: preseekMetrics.cacheHits,
+        preseekInflightReuses: preseekMetrics.inflightReuses,
+        preseekWorkerPosts: preseekMetrics.workerPosts,
+        preseekWorkerSuccesses: preseekMetrics.workerSuccesses,
+        preseekWorkerFailures: preseekMetrics.workerFailures,
+        preseekWaitRequests: preseekMetrics.waitRequests,
+        preseekWaitMatches: preseekMetrics.waitMatches,
+        preseekWaitResolved: preseekMetrics.waitResolved,
+        preseekWaitTimeouts: preseekMetrics.waitTimeouts,
+        preseekCachedBitmaps: preseekMetrics.cacheBitmaps,
         staleScrubOverlayDrops: stats.staleScrubOverlayDrops,
         scrubDroppedFrames: stats.scrubDroppedFrames,
         scrubUpdates: stats.scrubUpdates,
@@ -1633,11 +1658,44 @@ export const VideoPreview = memo(function VideoPreview({
     fastScrubTracksFingerprint,
   ]);
 
+  const fastScrubLiveItemsById = useMemo(() => {
+    const map = new Map<string, TimelineItem>();
+    for (const track of fastScrubScaledTracks) {
+      for (const item of track.items as TimelineItem[]) {
+        map.set(item.id, item);
+      }
+    }
+    return map;
+  }, [fastScrubScaledTracks]);
+  const fastScrubLiveItemsByIdRef = useRef<Map<string, TimelineItem>>(fastScrubLiveItemsById);
+  fastScrubLiveItemsByIdRef.current = fastScrubLiveItemsById;
+
+  const fastScrubKeyframesByItemId = useMemo(() => (
+    new Map(keyframes.map((entry) => [entry.itemId, entry]))
+  ), [keyframes]);
+  const fastScrubKeyframesByItemIdRef = useRef<Map<string, typeof keyframes[number]>>(fastScrubKeyframesByItemId);
+  fastScrubKeyframesByItemIdRef.current = fastScrubKeyframesByItemId;
+
+  const getLiveItemSnapshot = useCallback((itemId: string) => {
+    return fastScrubLiveItemsByIdRef.current.get(itemId);
+  }, []);
+
+  const getLiveKeyframes = useCallback((itemId: string) => {
+    return fastScrubKeyframesByItemIdRef.current.get(itemId);
+  }, []);
+
   const fastScrubScaledKeyframes = useMemo(() => {
     return keyframes;
   }, [
     keyframes,
   ]);
+  const previousFastScrubVisualStateRef = useRef<{
+    tracks: CompositionInputProps['tracks'];
+    keyframes: typeof fastScrubScaledKeyframes;
+  }>({
+    tracks: fastScrubScaledTracks,
+    keyframes: fastScrubScaledKeyframes,
+  });
 
   const fastScrubInputProps: CompositionInputProps = useMemo(() => ({
     fps,
@@ -1657,6 +1715,32 @@ export const VideoPreview = memo(function VideoPreview({
     fastScrubScaledKeyframes,
   ]);
 
+  const playbackTransitionFingerprint = useMemo(() => (
+    transitions
+      .map((transition) => (
+        `${transition.id}:${transition.type}:${transition.leftClipId}:${transition.rightClipId}:${transition.trackId ?? ''}:${transition.durationInFrames}:${transition.presentation ?? ''}:${transition.timing ?? ''}`
+      ))
+      .join('|')
+  ), [transitions]);
+
+  const fastScrubRendererStructureKey = useMemo(() => (
+    [
+      fps,
+      project.width,
+      project.height,
+      project.backgroundColor ?? '',
+      fastScrubTracksFingerprint,
+      playbackTransitionFingerprint,
+    ].join('::')
+  ), [
+    fastScrubTracksFingerprint,
+    fps,
+    playbackTransitionFingerprint,
+    project.backgroundColor,
+    project.height,
+    project.width,
+  ]);
+
   const playbackTransitionWindows = useMemo(() => {
     const clipMap = new Map<string, TimelineItem>();
     for (const track of fastScrubScaledTracks) {
@@ -1666,6 +1750,10 @@ export const VideoPreview = memo(function VideoPreview({
     }
     return resolveTransitionWindows(transitions, clipMap);
   }, [fastScrubScaledTracks, transitions]);
+  const fastScrubPreviewItems = useMemo(
+    () => fastScrubScaledTracks.flatMap((track) => track.items as TimelineItem[]),
+    [fastScrubScaledTracks],
+  );
 
   const playbackTransitionLookaheadFrames = useMemo(
     () => Math.max(2, Math.round(fps * 0.25)),
@@ -1676,14 +1764,14 @@ export const VideoPreview = memo(function VideoPreview({
     [fps],
   );
   const pausedTransitionPrearmFrames = useMemo(
-    () => Math.max(playbackTransitionLookaheadFrames, Math.round(fps * 0.75)),
+    () => Math.max(playbackTransitionLookaheadFrames, Math.round(fps * 3)),
     [fps, playbackTransitionLookaheadFrames],
   );
   const playingComplexTransitionPrearmFrames = useMemo(
     () => Math.max(playbackTransitionLookaheadFrames, Math.round(fps * 1.5)),
     [fps, playbackTransitionLookaheadFrames],
   );
-  const playbackTransitionPrerenderRunwayFrames = 3;
+  const playbackTransitionPrerenderRunwayFrames = 8;
   const playbackTransitionEffectfulStartFrames = useMemo(() => {
     const hasExpensiveVisuals = (item: TimelineItem) => (
       item.effects?.some((effect) => effect.enabled)
@@ -1733,11 +1821,48 @@ export const VideoPreview = memo(function VideoPreview({
     return playbackTransitionWindows.find((window) => window.startFrame === startFrame) ?? null;
   }, [playbackTransitionWindows]);
 
+  const getTransitionCooldownForWindow = useCallback((window: ResolvedTransitionWindow<TimelineItem>) => {
+    const leftOriginId = window.leftClip.originId;
+    const rightOriginId = window.rightClip.originId;
+
+    // Split/same-origin handoffs keep the primary lane alive across the exit,
+    // so extra post-overlap overlay frames just prolong the stale handoff path
+    // and can leak a visible 1-2 frame hitch.
+    if (leftOriginId && rightOriginId && leftOriginId === rightOriginId) {
+      return 0;
+    }
+
+    return playbackTransitionCooldownFrames;
+  }, [playbackTransitionCooldownFrames]);
+
   const getTransitionWindowForFrame = useCallback((frame: number) => {
     return playbackTransitionWindows.find((window) => (
-      frame >= window.startFrame && frame < window.endFrame + playbackTransitionCooldownFrames
+      frame >= window.startFrame && frame < window.endFrame + getTransitionCooldownForWindow(window)
     )) ?? null;
-  }, [playbackTransitionCooldownFrames, playbackTransitionWindows]);
+  }, [getTransitionCooldownForWindow, playbackTransitionWindows]);
+
+  /** Like getTransitionWindowForFrame but without cooldown — true only in the active span. */
+  const getActiveTransitionWindowForFrame = useCallback((frame: number) => {
+    return playbackTransitionWindows.find((window) => (
+      frame >= window.startFrame && frame < window.endFrame
+    )) ?? null;
+  }, [playbackTransitionWindows]);
+
+  const playbackTransitionOverlayWindows = useMemo(
+    () => playbackTransitionWindows.map((window) => ({
+      startFrame: window.startFrame,
+      endFrame: window.endFrame,
+      cooldownFrames: getTransitionCooldownForWindow(window),
+    })),
+    [getTransitionCooldownForWindow, playbackTransitionWindows],
+  );
+  const shouldPreserveHighFidelityBackwardPreview = useCallback((frame: number | null) => {
+    if (frame === null) return false;
+    if (getTransitionWindowForFrame(frame) !== null) {
+      return true;
+    }
+    return shouldForceContinuousPreviewOverlay(fastScrubPreviewItems, transitions.length, frame);
+  }, [fastScrubPreviewItems, getTransitionWindowForFrame, transitions.length]);
 
   const clearTransitionPlaybackSession = useCallback(() => {
     const activeTrace = transitionSessionTraceRef.current;
@@ -1786,14 +1911,63 @@ export const VideoPreview = memo(function VideoPreview({
       transitionSessionTraceRef.current = null;
     }
 
+    // Before releasing the hold, re-position each video element to the
+    // correct source time for the current frame.  The per-frame drift
+    // correction during the transition keeps elements within ~60ms of
+    // target.  Only hard-seek here for drifts > 150ms (safety net for
+    // edge cases).  Smaller drifts are left for RVFC to correct smoothly
+    // — a hard seek pauses the browser decode pipeline for 100ms+ and
+    // causes a visible freeze.
+    const tw = transitionSessionWindowRef.current;
+    if (tw) {
+      const currentFrame = usePlaybackStore.getState().currentFrame;
+      for (const clip of [tw.leftClip, tw.rightClip]) {
+        if (clip.type !== 'video') continue;
+        const el = transitionSessionPinnedElementsRef.current.get(clip.id);
+        if (!el) continue;
+        const localFrame = currentFrame - clip.from;
+        if (localFrame < 0) continue;
+        const sourceStart = clip.sourceStart ?? clip.trimStart ?? 0;
+        const sourceFps = clip.sourceFps ?? fps;
+        const clipSpeed = clip.speed ?? 1;
+        const targetTime = (sourceStart / sourceFps) + (localFrame * clipSpeed / fps);
+        const videoDuration = el.duration || Infinity;
+        const clamped = Math.min(Math.max(0, targetTime), videoDuration - 0.05);
+        const drift = Math.abs(el.currentTime - clamped);
+        if (drift > 0.15) {
+          // Large drift — hard seek (RVFC can't absorb this smoothly).
+          try {
+            el.currentTime = clamped;
+          } catch {
+            // Element may be settling — ignore transient seek failures.
+          }
+        } else if (drift > 0.016) {
+          // Small drift — nudge playbackRate so RVFC absorbs it smoothly
+          // over the next few frames without a decode pipeline stall.
+          el.playbackRate = clipSpeed;
+        }
+      }
+    }
+
     transitionSessionWindowRef.current = null;
     // Remove transition-hold marks so video-content resumes normal premount behavior.
+    // Audio gain stays at 0 here — the React volume effect in NativePreviewVideo
+    // restores the correct gain when _sharedTransitionSync flips back to false.
+    // Eagerly unmuting to 1.0 here would cause a brief volume spike between
+    // back-to-back transitions (e.g. B→A→A) before React corrects it.
     for (const el of transitionSessionPinnedElementsRef.current.values()) {
       if (el) delete el.dataset.transitionHold;
     }
+    // Keep exit elements as a fallback for the DOM provider for a few frames.
+    // After the session clears, shadow elements may unmount before the normal
+    // rendering path registers new elements — causing a mediabunny fallback
+    // gap with 50-300ms stalls.  The exit elements bridge this gap.
+    transitionExitElementsRef.current = new Map(transitionSessionPinnedElementsRef.current);
     transitionSessionPinnedElementsRef.current.clear();
+    transitionSessionStallCountRef.current.clear();
     transitionSessionBufferedFramesRef.current.clear();
-  }, [pushTransitionTrace]);
+    transitionPrewarmPromiseRef.current = null;
+  }, [fps, pushTransitionTrace]);
 
   const pinTransitionPlaybackSession = useCallback((window: ResolvedTransitionWindow<TimelineItem> | null) => {
     if (!window) {
@@ -1855,10 +2029,34 @@ export const VideoPreview = memo(function VideoPreview({
       leftHasEffects,
       rightHasEffects,
     });
-    transitionSessionPinnedElementsRef.current = new Map([
-      [window.leftClip.id, getBestDomVideoElementForItem(window.leftClip.id)],
-      [window.rightClip.id, getBestDomVideoElementForItem(window.rightClip.id)],
-    ]);
+    const isPlaying = usePlaybackStore.getState().isPlaying;
+    const pinnedElements = new Map<string, HTMLVideoElement | null>();
+    for (const clip of [window.leftClip, window.rightClip]) {
+      const el = getBestDomVideoElementForItem(clip.id);
+      pinnedElements.set(clip.id, el);
+      // Set the hold IMMEDIATELY so video-content's premount guard
+      // (which checks data-transition-hold) doesn't pause the element
+      // before the render loop calls getPinnedTransitionElementForItem.
+      // Without this, shadows mount → premount effect pauses element →
+      // hold set too late → decoder stalled → frozen currentTime.
+      if (el && isPlaying) {
+        el.dataset.transitionHold = '1';
+        const clipSpeed = clip.speed ?? 1;
+        if (el.readyState >= 2) {
+          transitionSafePlay(el, clipSpeed);
+        } else {
+          // Element not ready yet — listen for enough data to play.
+          const onCanPlay = () => {
+            el.removeEventListener('canplay', onCanPlay);
+            if (el.dataset.transitionHold === '1' && el.paused) {
+              transitionSafePlay(el, clipSpeed);
+            }
+          };
+          el.addEventListener('canplay', onCanPlay, { once: true });
+        }
+      }
+    }
+    transitionSessionPinnedElementsRef.current = pinnedElements;
     transitionSessionBufferedFramesRef.current.clear();
     return window;
   }, [clearTransitionPlaybackSession, pushTransitionTrace, transitionWindowUsesDomProvider]);
@@ -1867,7 +2065,20 @@ export const VideoPreview = memo(function VideoPreview({
     const sessionWindow = transitionSessionWindowRef.current;
     const isSessionParticipant = sessionWindow?.leftClip.id === itemId || sessionWindow?.rightClip.id === itemId;
     if (!isSessionParticipant) {
-      return getBestDomVideoElementForItem(itemId);
+      // Check registry first; if no element found, try exit elements as
+      // a bridge while the normal rendering path re-mounts the element.
+      const registryEl = getBestDomVideoElementForItem(itemId);
+      if (registryEl) {
+        // Registry has an element — clear exit fallback for this item
+        transitionExitElementsRef.current.delete(itemId);
+        return registryEl;
+      }
+      const exitEl = transitionExitElementsRef.current.get(itemId);
+      if (exitEl?.isConnected && exitEl.readyState >= 2) {
+        return exitEl;
+      }
+      transitionExitElementsRef.current.delete(itemId);
+      return null;
     }
 
     // During playback, always provide DOM video elements for transition
@@ -1895,12 +2106,7 @@ export const VideoPreview = memo(function VideoPreview({
     const ensurePlaying = (el: HTMLVideoElement) => {
       if (isPlaying) {
         el.dataset.transitionHold = '1';
-        if (Math.abs(el.playbackRate - clipSpeed) > 0.01) {
-          el.playbackRate = clipSpeed;
-        }
-        if (el.paused) {
-          el.play().catch(() => {});
-        }
+        transitionSafePlay(el, clipSpeed);
       }
     };
 
@@ -1957,6 +2163,21 @@ export const VideoPreview = memo(function VideoPreview({
   }, [getUpcomingTransitionStartFrame, playingComplexTransitionPrearmFrames]);
 
   const forceFastScrubOverlay = showGpuEffectsOverlay;
+
+  /**
+   * Returns true when the overlay should be shown for a paused-on-transition frame.
+   * Uses the ACTIVE span only (no cooldown) so overlays and live-preview invalidators
+   * don't mis-handle post-transition cooldown frames.
+   */
+  const isPausedTransitionOverlayActive = useCallback((frame: number, playbackState: { isPlaying: boolean; previewFrame: number | null }) => {
+    return (
+      !playbackState.isPlaying
+      && playbackState.previewFrame === null
+      && !forceFastScrubOverlay
+      && getActiveTransitionWindowForFrame(frame) !== null
+    );
+  }, [forceFastScrubOverlay, getActiveTransitionWindowForFrame]);
+
   // Styled, animated text can visibly flip between the DOM Player renderer
   // and the fast-scrub canvas renderer. Keep scrub preview on the Player path.
   const preferPlayerForStyledTextScrub = (
@@ -2014,6 +2235,7 @@ export const VideoPreview = memo(function VideoPreview({
       }
       scrubRendererRef.current = null;
     }
+    scrubRendererStructureKeyRef.current = null;
 
     scrubOffscreenCanvasRef.current = null;
     scrubOffscreenCtxRef.current = null;
@@ -2022,6 +2244,7 @@ export const VideoPreview = memo(function VideoPreview({
       try { bgTransitionRendererRef.current.dispose(); } catch { /* */ }
       bgTransitionRendererRef.current = null;
     }
+    bgTransitionRendererStructureKeyRef.current = null;
     bgTransitionInitPromiseRef.current = null;
     bgTransitionRenderInFlightRef.current = false;
   }, [clearPendingFastScrubHandoff, clearTransitionPlaybackSession]);
@@ -2030,6 +2253,12 @@ export const VideoPreview = memo(function VideoPreview({
   // transition frames without conflicting with the main rAF pump renderer.
   const ensureBgTransitionRenderer = useCallback(async (): Promise<CompositionRenderer | null> => {
     if (!FAST_SCRUB_RENDERER_ENABLED || typeof OffscreenCanvas === 'undefined' || isResolving) return null;
+    if (
+      bgTransitionRendererRef.current
+      && bgTransitionRendererStructureKeyRef.current !== fastScrubRendererStructureKey
+    ) {
+      disposeFastScrubRenderer();
+    }
     if (bgTransitionRendererRef.current) return bgTransitionRendererRef.current;
     if (bgTransitionInitPromiseRef.current) return bgTransitionInitPromiseRef.current;
 
@@ -2044,11 +2273,14 @@ export const VideoPreview = memo(function VideoPreview({
           getPreviewEffectsOverride,
           getPreviewCornerPinOverride,
           getPreviewPathVerticesOverride,
+          getLiveItemSnapshot,
+          getLiveKeyframes,
         });
         if ('warmGpuPipeline' in renderer) {
           void renderer.warmGpuPipeline();
         }
         bgTransitionRendererRef.current = renderer;
+        bgTransitionRendererStructureKeyRef.current = fastScrubRendererStructureKey;
         return renderer;
       } catch {
         return null;
@@ -2057,12 +2289,31 @@ export const VideoPreview = memo(function VideoPreview({
       }
     })();
     return bgTransitionInitPromiseRef.current;
-  }, [fastScrubInputProps, getPreviewTransformOverride, getPreviewEffectsOverride, getPreviewCornerPinOverride, getPreviewPathVerticesOverride, isResolving, renderSize.width, renderSize.height]);
+  }, [
+    disposeFastScrubRenderer,
+    fastScrubInputProps,
+    fastScrubRendererStructureKey,
+    getLiveItemSnapshot,
+    getLiveKeyframes,
+    getPreviewCornerPinOverride,
+    getPreviewEffectsOverride,
+    getPreviewPathVerticesOverride,
+    getPreviewTransformOverride,
+    isResolving,
+    renderSize.width,
+    renderSize.height,
+  ]);
 
   const ensureFastScrubRenderer = useCallback(async (): Promise<CompositionRenderer | null> => {
     if (!FAST_SCRUB_RENDERER_ENABLED) return null;
     if (typeof OffscreenCanvas === 'undefined') return null;
     if (isResolving) return null;
+    if (
+      scrubRendererRef.current
+      && scrubRendererStructureKeyRef.current !== fastScrubRendererStructureKey
+    ) {
+      disposeFastScrubRenderer();
+    }
     if (scrubRendererRef.current) return scrubRendererRef.current;
     if (scrubInitPromiseRef.current) return scrubInitPromiseRef.current;
 
@@ -2078,6 +2329,8 @@ export const VideoPreview = memo(function VideoPreview({
           getPreviewEffectsOverride,
           getPreviewCornerPinOverride,
           getPreviewPathVerticesOverride,
+          getLiveItemSnapshot,
+          getLiveKeyframes,
         });
         const playbackState = usePlaybackStore.getState();
         const interactionMode = getPreviewInteractionMode({
@@ -2114,6 +2367,7 @@ export const VideoPreview = memo(function VideoPreview({
         scrubOffscreenCtxRef.current = offscreenCtx;
         scrubOffscreenRenderedFrameRef.current = null;
         scrubRendererRef.current = renderer;
+        scrubRendererStructureKeyRef.current = fastScrubRendererStructureKey;
         // Eagerly warm the GPU pipeline in the background so the first
         // transition frame doesn't pay the ~100-150ms WebGPU init cost.
         if ('warmGpuPipeline' in renderer) {
@@ -2133,7 +2387,21 @@ export const VideoPreview = memo(function VideoPreview({
     })();
 
     return scrubInitPromiseRef.current;
-  }, [fastScrubInputProps, fps, getPreviewTransformOverride, getPreviewEffectsOverride, getPreviewCornerPinOverride, getPreviewPathVerticesOverride, isResolving, renderSize.height, renderSize.width]);
+  }, [
+    disposeFastScrubRenderer,
+    fastScrubInputProps,
+    fastScrubRendererStructureKey,
+    fps,
+    getLiveItemSnapshot,
+    getLiveKeyframes,
+    getPreviewTransformOverride,
+    getPreviewEffectsOverride,
+    getPreviewCornerPinOverride,
+    getPreviewPathVerticesOverride,
+    isResolving,
+    renderSize.height,
+    renderSize.width,
+  ]);
 
   const renderOffscreenFrame = useCallback(async (targetFrame: number): Promise<OffscreenCanvas | null> => {
     const offscreen = scrubOffscreenCanvasRef.current;
@@ -2300,7 +2568,90 @@ export const VideoPreview = memo(function VideoPreview({
   // Dispose/recreate fast scrub renderer when composition inputs change.
   useEffect(() => {
     disposeFastScrubRenderer();
-  }, [disposeFastScrubRenderer, fastScrubInputProps, renderSize.height, renderSize.width]);
+  }, [disposeFastScrubRenderer, fastScrubRendererStructureKey, renderSize.height, renderSize.width]);
+
+  // Visual-only edits should keep the warm renderer alive. Invalidate cached
+  // frames and ask the overlay to repaint instead of rebuilding GPU/decoder state.
+  useEffect(() => {
+    const previousVisualState = previousFastScrubVisualStateRef.current;
+    previousFastScrubVisualStateRef.current = {
+      tracks: fastScrubScaledTracks,
+      keyframes: fastScrubScaledKeyframes,
+    };
+
+    const visualInvalidationRanges = collectVisualInvalidationRanges({
+      previousTracks: previousVisualState.tracks,
+      nextTracks: fastScrubScaledTracks,
+      previousKeyframes: previousVisualState.keyframes,
+      nextKeyframes: fastScrubScaledKeyframes,
+    });
+    if (visualInvalidationRanges.length === 0) {
+      return;
+    }
+
+    const scrubRenderer = scrubRendererRef.current;
+    const bgRenderer = bgTransitionRendererRef.current;
+    const scrubRendererMatchesStructure = (
+      scrubRendererStructureKeyRef.current === fastScrubRendererStructureKey
+    );
+    const bgRendererMatchesStructure = (
+      bgTransitionRendererStructureKeyRef.current === fastScrubRendererStructureKey
+    );
+
+    if (!scrubRendererMatchesStructure && !bgRendererMatchesStructure) {
+      return;
+    }
+
+    const invalidationRequest = { ranges: visualInvalidationRanges };
+    if (scrubRenderer && scrubRendererMatchesStructure) {
+      scrubRenderer.invalidateFrameCache(invalidationRequest);
+    }
+    if (bgRenderer && bgRendererMatchesStructure) {
+      bgRenderer.invalidateFrameCache(invalidationRequest);
+    }
+
+    const playbackState = usePlaybackStore.getState();
+    const targetFrame = playbackState.previewFrame ?? playbackState.currentFrame;
+    const currentFrameInvalidated = isFrameInRanges(targetFrame, visualInvalidationRanges);
+
+    if (
+      scrubOffscreenRenderedFrameRef.current !== null
+      && isFrameInRanges(scrubOffscreenRenderedFrameRef.current, visualInvalidationRanges)
+    ) {
+      scrubOffscreenRenderedFrameRef.current = null;
+    }
+
+    let removedBufferedFrame = false;
+    for (const frame of [...transitionSessionBufferedFramesRef.current.keys()]) {
+      if (!isFrameInRanges(frame, visualInvalidationRanges)) continue;
+      transitionSessionBufferedFramesRef.current.delete(frame);
+      removedBufferedFrame = true;
+    }
+    if (removedBufferedFrame) {
+      lastPausedPrearmTargetRef.current = null;
+    }
+
+    if (
+      scrubRenderer
+      && scrubRendererMatchesStructure
+      && currentFrameInvalidated
+      && (
+        forceFastScrubOverlay
+        || playbackState.previewFrame !== null
+        || showFastScrubOverlayRef.current
+        || showPlaybackTransitionOverlayRef.current
+      )
+    ) {
+      scrubRequestedFrameRef.current = targetFrame;
+      void resumeScrubLoopRef.current();
+    }
+  }, [
+    fastScrubInputProps,
+    fastScrubScaledKeyframes,
+    fastScrubScaledTracks,
+    fastScrubRendererStructureKey,
+    forceFastScrubOverlay,
+  ]);
 
   const captureCurrentFrame = useCallback(async (options?: CaptureOptions): Promise<string | null> => {
     if (captureInFlightRef.current) {
@@ -2475,7 +2826,6 @@ export const VideoPreview = memo(function VideoPreview({
         // GPU not available — renderer will fall back to CPU path.
       }
     })();
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time mount
   }, []);
 
   // Background warm-up of full renderer once media URLs are resolved.
@@ -2532,7 +2882,7 @@ export const VideoPreview = memo(function VideoPreview({
 
     const getPlaybackTransitionStateForFrame = (frame: number) => (
       resolvePlaybackTransitionOverlayState(
-        playbackTransitionWindows,
+        playbackTransitionOverlayWindows,
         frame,
         playbackTransitionLookaheadFrames,
         playbackTransitionCooldownFrames,
@@ -2877,12 +3227,19 @@ export const VideoPreview = memo(function VideoPreview({
                 const prevSession = transitionSessionWindowRef.current;
                 const isNewSession = !prevSession || prevSession.transition.id !== windowForFrame.transition.id;
                 pinTransitionPlaybackSession(windowForFrame);
-                // Pre-warm mediabunny decoders when entering a transition mid-playback
-                // (e.g. starting playback inside a transition zone). Pre-seek to
-                // the current frame (not startFrame) so the decoder cursor lands
-                // close to where the first real render will need it.
+                // Await the prearm prewarm so mediabunny decoders are positioned
+                // at the correct source time before rendering. The prearm fires
+                // ~2s ahead so this resolves near-instantly in the common case.
+                // Without this, decoders may be at a stale position from a prior
+                // playback, causing 100-300ms backward keyframe seeks per frame.
+                if (transitionPrewarmPromiseRef.current) {
+                  await transitionPrewarmPromiseRef.current;
+                  transitionPrewarmPromiseRef.current = null;
+                }
+                // When entering a transition mid-playback (no prearm happened),
+                // await the prewarm synchronously to position decoders.
                 if (isNewSession && 'prewarmItems' in renderer) {
-                  void renderer.prewarmItems(
+                  await renderer.prewarmItems(
                     [windowForFrame.leftClip.id, windowForFrame.rightClip.id],
                     frameToRender,
                   );
@@ -2934,9 +3291,26 @@ export const VideoPreview = memo(function VideoPreview({
               }
             }
           } else {
-            // Background scrub prewarm only needs to advance decode state for
-            // nearby sources. Avoid full composition work for non-visible frames.
-            await renderer.prewarmFrame(frameToRender);
+            // Background scrub prewarm: collect eligible frames into a batch
+            // for samplesAtTimestamps() optimized pipeline, then dispatch.
+            const prewarmBatch: number[] = [frameToRender];
+            // Drain more frames from the queue while within budget and not stale
+            while (scrubPrewarmQueueRef.current.length > 0) {
+              if (scrubRequestedFrameRef.current !== null) break;
+              if (suppressScrubBackgroundPrewarmRef.current) break;
+              if (usePlaybackStore.getState().isPlaying) break;
+              if (prewarmBudgetStart > 0 && performance.now() - prewarmBudgetStart > FAST_SCRUB_PREWARM_RENDER_BUDGET_MS) break;
+              const next = scrubPrewarmQueueRef.current.shift()!;
+              scrubPrewarmQueuedSetRef.current.delete(next);
+              prewarmBatch.push(next);
+            }
+            // Batch prewarm via samplesAtTimestamps — each packet decoded at most
+            // once across the batch. Falls back to sequential drawFrame internally
+            // for sources where batch mode has been disabled.
+            await renderer.prewarmFrames(prewarmBatch);
+            for (const f of prewarmBatch) {
+              markPrewarmed(f);
+            }
           }
           if (!scrubMountedRef.current || isStale()) break;
 
@@ -2958,9 +3332,14 @@ export const VideoPreview = memo(function VideoPreview({
             // Guard against stale in-flight renders that finish after scrub has ended.
             // Without this, a completed old render can re-show the overlay and hide
             // live Player updates (e.g. ruler click + gizmo interaction).
+            const isPausedOnTransitionFrame = (
+              frameToRender === playbackState.currentFrame
+              && isPausedTransitionOverlayActive(frameToRender, playbackState)
+            );
             if (
               !shouldShowPlaybackTransitionOverlay
               && !forceFastScrubOverlay
+              && !isPausedOnTransitionFrame
               && !shouldShowFastScrubOverlay({
                 isGizmoInteracting: isGizmoInteractingRef.current,
                 isPlaying: playbackState.isPlaying,
@@ -3051,6 +3430,15 @@ export const VideoPreview = memo(function VideoPreview({
           drawSourceToDisplay(buffered, currentFrame);
           scrubOffscreenRenderedFrameRef.current = currentFrame;
           lastRafPresentedFrame = currentFrame;
+          // Pre-start the render loop for the next uncached frame so the
+          // GPU + decode pipeline is already warm when the buffer runs out.
+          // Without this, the first post-cache frame stalls 100-200ms.
+          const nextFrame = currentFrame + 1;
+          if (!transitionSessionBufferedFramesRef.current.has(nextFrame)
+            && !scrubRenderInFlightRef.current) {
+            scrubRequestedFrameRef.current = nextFrame;
+            void pumpRenderLoop();
+          }
         } else {
           scrubRequestedFrameRef.current = currentFrame;
           if (!scrubRenderInFlightRef.current) {
@@ -3086,7 +3474,11 @@ export const VideoPreview = memo(function VideoPreview({
         && Math.abs(state.currentFrame - prev.currentFrame) >= JUMP_PRESEEK_THRESHOLD_FRAMES
         && !state.isPlaying
       ) {
+        // Group timestamps by source URL for batch preseek — mediabunny's
+        // samplesAtTimestamps() shares decoder state across the batch,
+        // decoding each packet at most once.
         const frame = state.currentFrame;
+        const bySource = new Map<string, number[]>();
         for (const track of combinedTracks) {
           for (const item of track.items) {
             if (item.type !== 'video' || !('src' in item) || !item.src) continue;
@@ -3098,8 +3490,16 @@ export const VideoPreview = memo(function VideoPreview({
             const sourceStart = item.sourceStart ?? item.trimStart ?? 0;
             const speed = item.speed ?? 1;
             const sourceTime = (sourceStart / item.sourceFps) + (localFrame / fps) * speed;
-            void workerBackgroundPreseek(item.src, sourceTime);
+            const existing = bySource.get(item.src);
+            if (existing) {
+              existing.push(sourceTime);
+            } else {
+              bySource.set(item.src, [sourceTime]);
+            }
           }
+        }
+        for (const [src, timestamps] of bySource) {
+          void workerBackgroundBatchPreseek(src, timestamps);
         }
       }
 
@@ -3204,11 +3604,95 @@ export const VideoPreview = memo(function VideoPreview({
         // leaving simple transitions (fade, wipe, slide, etc.) without a
         // pinned session — causing frozen incoming clips and dropped frames.
         // First check if we're already inside a transition — pin that session
-        // so the DOM video provider is available immediately.
+        // so the DOM video provider is available immediately, and prewarm the
+        // decoders for both clips so the first rendered frame doesn't stall.
         const activeTransitionWindow = getTransitionWindowForFrame(state.currentFrame);
         if (activeTransitionWindow && !transitionSessionWindowRef.current) {
           pinTransitionPlaybackSession(activeTransitionWindow);
           lastPlayingPrearmTargetRef.current = activeTransitionWindow.startFrame;
+          // Pre-seek decoders for both transition clips at the current frame.
+          const renderer = scrubRendererRef.current;
+          if (renderer && 'prewarmItems' in renderer) {
+            void renderer.prewarmItems(
+              [activeTransitionWindow.leftClip.id, activeTransitionWindow.rightClip.id],
+              state.currentFrame,
+            );
+          }
+          {
+            const transClips = [activeTransitionWindow.leftClip, activeTransitionWindow.rightClip];
+            const transBySource = new Map<string, number[]>();
+            for (const clip of transClips) {
+              if (clip.type === 'video' && 'src' in clip && clip.src && clip.sourceFps) {
+                const localFrame = state.currentFrame - clip.from;
+                const sourceStart = clip.sourceStart ?? clip.trimStart ?? 0;
+                const clipSpeed = clip.speed ?? 1;
+                const sourceTime = (sourceStart / clip.sourceFps) + (localFrame / fps) * clipSpeed;
+                const existing = transBySource.get(clip.src);
+                if (existing) existing.push(sourceTime);
+                else transBySource.set(clip.src, [sourceTime]);
+              }
+            }
+            for (const [src, timestamps] of transBySource) {
+              void workerBackgroundBatchPreseek(src, timestamps);
+            }
+          }
+        }
+
+        // Per-frame drift correction for held video elements during an active
+        // transition session.  Without this, elements play freely and drift
+        // seconds away from their expected position, causing a hard backward
+        // seek (and visible freeze) when the hold is released at exit.
+        // Uses gentle playbackRate adjustment (same pattern as RVFC) so the
+        // element never drifts far — making the exit-time pre-seek a no-op.
+        const sessionWindow = transitionSessionWindowRef.current;
+        if (sessionWindow && transitionSessionPinnedElementsRef.current.size > 0) {
+          for (const clip of [sessionWindow.leftClip, sessionWindow.rightClip]) {
+            if (clip.type !== 'video') continue;
+            const el = transitionSessionPinnedElementsRef.current.get(clip.id);
+            if (!el || el.dataset.transitionHold !== '1') continue;
+            const localFrame = state.currentFrame - clip.from;
+            if (localFrame < 0) continue;
+            const sourceStart = clip.sourceStart ?? clip.trimStart ?? 0;
+            const sourceFps = clip.sourceFps ?? fps;
+            const clipSpeed = clip.speed ?? 1;
+            const targetTime = (sourceStart / sourceFps) + (localFrame * clipSpeed / fps);
+
+            // Detect stalled decode: if currentTime hasn't changed for 3+
+            // frames, the browser's decode pipeline is stuck. Re-trigger
+            // play() and seek to unstick it.
+            const stallEntry = transitionSessionStallCountRef.current.get(clip.id);
+            if (stallEntry && Math.abs(el.currentTime - stallEntry.ct) < 0.001) {
+              const newCount = stallEntry.count + 1;
+              transitionSessionStallCountRef.current.set(clip.id, { ct: stallEntry.ct, count: newCount });
+              if (newCount >= 3) {
+                // Unstick: seek to target and re-trigger play.
+                try { el.currentTime = targetTime; } catch { /* settling */ }
+                el.playbackRate = clipSpeed;
+                el.play().catch(() => { /* best effort */ });
+                transitionSessionStallCountRef.current.set(clip.id, { ct: targetTime, count: 0 });
+                continue;
+              }
+            } else {
+              transitionSessionStallCountRef.current.set(clip.id, { ct: el.currentTime, count: 0 });
+            }
+
+            const drift = el.currentTime - targetTime;
+            if (Math.abs(drift) > 0.2) {
+              // Large drift — hard seek to prevent runaway divergence.
+              try { el.currentTime = targetTime; } catch { /* settling */ }
+              el.playbackRate = clipSpeed;
+            } else if (Math.abs(drift) > 0.016) {
+              // Small drift — gentle rate correction (±6% of nominal speed).
+              const correction = -drift * 0.25;
+              const maxAdj = Math.max(0.03, clipSpeed * 0.06);
+              el.playbackRate = Math.max(
+                clipSpeed - maxAdj,
+                Math.min(clipSpeed + maxAdj, clipSpeed + correction),
+              );
+            }
+          }
+        } else if (transitionSessionStallCountRef.current.size > 0) {
+          transitionSessionStallCountRef.current.clear();
         }
 
         // Only prearm an upcoming transition if no active session is pinned.
@@ -3227,21 +3711,33 @@ export const VideoPreview = memo(function VideoPreview({
             if (transitionWindow) {
               const renderer = scrubRendererRef.current;
               if (renderer && 'prewarmItems' in renderer) {
-                void renderer.prewarmItems(
+                transitionPrewarmPromiseRef.current = renderer.prewarmItems(
                   [transitionWindow.leftClip.id, transitionWindow.rightClip.id],
                   transitionWindow.startFrame,
                 );
               }
-              // Fire background worker preseek for transition clips so the
-              // cached bitmap is ready as a fallback if mediabunny/DOM video
-              // can't deliver the first frame fast enough.
-              for (const clip of [transitionWindow.leftClip, transitionWindow.rightClip]) {
-                if (clip.type === 'video' && 'src' in clip && clip.src && clip.sourceFps) {
-                  const localFrame = transitionWindow.startFrame - clip.from;
-                  const sourceStart = clip.sourceStart ?? clip.trimStart ?? 0;
-                  const clipSpeed = clip.speed ?? 1;
-                  const sourceTime = (sourceStart / clip.sourceFps) + (localFrame / fps) * clipSpeed;
-                  void workerBackgroundPreseek(clip.src, sourceTime);
+              // Fire background worker batch preseek for the first several
+              // transition frames per clip. Pre-decoding a batch gives the
+              // render loop cached bitmaps as fallback — reduces the 100-300ms
+              // cold decode stall at transition entry.
+              {
+                const preseekCount = Math.min(8, transitionWindow.endFrame - transitionWindow.startFrame);
+                const transBySource = new Map<string, number[]>();
+                for (const clip of [transitionWindow.leftClip, transitionWindow.rightClip]) {
+                  if (clip.type !== 'video' || !('src' in clip) || !clip.src || !clip.sourceFps) continue;
+                  const timestamps: number[] = [];
+                  for (let i = 0; i < preseekCount; i++) {
+                    const localFrame = (transitionWindow.startFrame + i) - clip.from;
+                    const sourceStart = clip.sourceStart ?? clip.trimStart ?? 0;
+                    const clipSpeed = clip.speed ?? 1;
+                    timestamps.push((sourceStart / clip.sourceFps) + (localFrame / fps) * clipSpeed);
+                  }
+                  const existing = transBySource.get(clip.src);
+                  if (existing) existing.push(...timestamps);
+                  else transBySource.set(clip.src, timestamps);
+                }
+                for (const [src, timestamps] of transBySource) {
+                  void workerBackgroundBatchPreseek(src, timestamps);
                 }
               }
             }
@@ -3328,10 +3824,16 @@ export const VideoPreview = memo(function VideoPreview({
       }
 
       if (!state.isPlaying && state.previewFrame === null) {
-        const pausedPrewarmStartFrame = getPausedTransitionPrewarmStartFrame(state.currentFrame);
+        // Check both: upcoming transitions AND the transition we're currently
+        // inside.  getPausedTransitionPrewarmStartFrame only looks forward,
+        // so pausing/seeking inside a transition left no session pinned —
+        // causing the render loop to fall back to mediabunny for both clips.
+        const pausedActiveWindow = getTransitionWindowForFrame(state.currentFrame);
+        const pausedPrewarmStartFrame = pausedActiveWindow?.startFrame
+          ?? getPausedTransitionPrewarmStartFrame(state.currentFrame);
         if (pausedPrewarmStartFrame !== null) {
           if (forceFastScrubOverlay) {
-            const tw = getTransitionWindowByStartFrame(pausedPrewarmStartFrame);
+            const tw = pausedActiveWindow ?? getTransitionWindowByStartFrame(pausedPrewarmStartFrame);
             if (tw) {
               pinTransitionPlaybackSession(tw);
               if (lastPausedPrearmTargetRef.current !== pausedPrewarmStartFrame) {
@@ -3343,31 +3845,60 @@ export const VideoPreview = memo(function VideoPreview({
                       tw.startFrame,
                     );
                   }
-                  // Background pre-render (separate renderer, no lock conflict)
-                  if (bgTransitionRenderInFlightRef.current) return;
-                  bgTransitionRenderInFlightRef.current = true;
-                  try {
-                    const bgRenderer = await ensureBgTransitionRenderer();
-                    if (bgRenderer && !usePlaybackStore.getState().isPlaying) {
-                      await bgRenderer.renderFrame(tw.startFrame);
-                      // Cache directly from the bg renderer's canvas (not the
-                      // main renderer's scrubOffscreenCanvasRef which is stale).
-                      if ('getCanvas' in bgRenderer) {
-                        const bgCanvas = (bgRenderer as { getCanvas: () => OffscreenCanvas }).getCanvas();
-                        const snapshot = new OffscreenCanvas(bgCanvas.width, bgCanvas.height);
-                        const snapshotCtx = snapshot.getContext('2d');
-                        if (snapshotCtx) {
-                          snapshotCtx.drawImage(bgCanvas, 0, 0);
-                          transitionSessionBufferedFramesRef.current.set(tw.startFrame, snapshot);
-                        }
-                      }
+                  // Pre-seed worker bitmap cache for transition clips (same as
+                  // playing prearm). Positions the worker decoder so cached
+                  // bitmaps are ready as a fallback if DOM video / mediabunny
+                  // can't deliver the first transition frame fast enough.
+                  for (const clip of [tw.leftClip, tw.rightClip]) {
+                    if (clip.type === 'video' && 'src' in clip && clip.src && clip.sourceFps) {
+                      const localFrame = tw.startFrame - clip.from;
+                      const sourceStart = clip.sourceStart ?? clip.trimStart ?? 0;
+                      const clipSpeed = clip.speed ?? 1;
+                      const sourceTime = (sourceStart / clip.sourceFps) + (localFrame / fps) * clipSpeed;
+                      void workerBackgroundPreseek(clip.src, sourceTime);
                     }
-                  } catch { /* */ } finally {
-                    bgTransitionRenderInFlightRef.current = false;
+                  }
+                  // Pre-render the first few transition frames using the MAIN
+                  // renderer (whose decoders are already at tw.startFrame from
+                  // the prewarmItems call above).  The previous approach created
+                  // a separate bg renderer which required its own GPU pipeline
+                  // init + cold mediabunny decode — taking 1-2s and rarely
+                  // completing before playback started.  Using the main renderer
+                  // is fast because everything is already warm.  Pre-rendering
+                  // multiple frames gives the render loop a head start so the
+                  // first cold-rendered transition frame isn't frame 1.
+                  if (!usePlaybackStore.getState().isPlaying && mainRenderer) {
+                    const preRenderCount = Math.min(playbackTransitionPrerenderRunwayFrames, tw.endFrame - tw.startFrame);
+                    for (let fi = 0; fi < preRenderCount; fi++) {
+                      if (usePlaybackStore.getState().isPlaying) break;
+                      const frame = tw.startFrame + fi;
+                      try {
+                        await mainRenderer.renderFrame(frame);
+                        if ('getCanvas' in mainRenderer) {
+                          const srcCanvas = (mainRenderer as { getCanvas: () => OffscreenCanvas }).getCanvas();
+                          const snapshot = new OffscreenCanvas(srcCanvas.width, srcCanvas.height);
+                          const snapshotCtx = snapshot.getContext('2d');
+                          if (snapshotCtx) {
+                            snapshotCtx.drawImage(srcCanvas, 0, 0);
+                            transitionSessionBufferedFramesRef.current.set(frame, snapshot);
+                          }
+                        }
+                      } catch { break; }
+                    }
                   }
                 })();
               }
             }
+          } else if (pausedActiveWindow) {
+            // Paused INSIDE a transition — pin the session and render the
+            // current frame so the GPU transition effect is visible even
+            // without forceFastScrubOverlay.  Without this, the DOM Player
+            // shows the raw video frame because CSS/DOM transition rendering
+            // was removed — all transitions are GPU-only.
+            const tw = pausedActiveWindow;
+            pinTransitionPlaybackSession(tw);
+            scrubRequestedFrameRef.current = state.currentFrame;
+            void pumpRenderLoop();
           } else {
             schedulePlaybackTransitionPrepare(pausedPrewarmStartFrame);
           }
@@ -3452,12 +3983,18 @@ export const VideoPreview = memo(function VideoPreview({
         return;
       }
 
+      const isPausedInsideTransition = isPausedTransitionOverlayActive(state.currentFrame, state);
       const useCurrentFrameAsTarget = (
         forceFastScrubOverlay
-        || (isGizmoInteractingRef.current && !preferPlayerForTextGizmoRef.current)
+        || isPausedInsideTransition
+      );
+      const prevIsPausedInsideTransition = isPausedTransitionOverlayActive(prev.currentFrame, prev);
+      const prevUseCurrentFrameAsTarget = (
+        forceFastScrubOverlay
+        || prevIsPausedInsideTransition
       );
       const targetFrame = state.previewFrame ?? (useCurrentFrameAsTarget ? state.currentFrame : null);
-      const prevTargetFrame = prev.previewFrame ?? (useCurrentFrameAsTarget ? prev.currentFrame : null);
+      const prevTargetFrame = prev.previewFrame ?? (prevUseCurrentFrameAsTarget ? prev.currentFrame : null);
       const playStateChanged = state.isPlaying !== prev.isPlaying;
       const isAtomicScrubTarget = (
         state.previewFrame !== null
@@ -3482,12 +4019,25 @@ export const VideoPreview = memo(function VideoPreview({
         scrubDirectionRef.current = 0;
       }
 
+      // Update cache eviction hint so Tier 1/3 prefer evicting frames in the
+      // opposite scrub direction — preserves frames the user is moving toward.
+      if (targetFrame !== null && scrubRendererRef.current && 'getScrubbingCache' in scrubRendererRef.current) {
+        scrubRendererRef.current.getScrubbingCache()?.setEvictionHint(
+          targetFrame,
+          scrubDirectionRef.current,
+        );
+      }
+
       const nextSuppressBackgroundPrewarm = FAST_SCRUB_DISABLE_BACKGROUND_PREWARM_ON_BACKWARD
         && scrubDirectionRef.current < 0;
+      const preserveHighFidelityBackwardPreview = shouldPreserveHighFidelityBackwardPreview(
+        targetFrame,
+      );
       const nextFallbackToPlayer = !forceFastScrubOverlay
         && FAST_SCRUB_FALLBACK_TO_PLAYER_ON_BACKWARD
         && scrubDirectionRef.current < 0
-        && !isAtomicScrubTarget;
+        && !isAtomicScrubTarget
+        && !preserveHighFidelityBackwardPreview;
       if (nextSuppressBackgroundPrewarm !== suppressScrubBackgroundPrewarmRef.current) {
         suppressScrubBackgroundPrewarmRef.current = nextSuppressBackgroundPrewarm;
         scrubPrewarmQueueRef.current = [];
@@ -3563,7 +4113,11 @@ export const VideoPreview = memo(function VideoPreview({
       }
 
       let nextRequestedFrame = targetFrame;
-      if (scrubDirectionRef.current < 0 && !isAtomicScrubTarget) {
+      if (
+        scrubDirectionRef.current < 0
+        && !isAtomicScrubTarget
+        && !preserveHighFidelityBackwardPreview
+      ) {
         const nowMs = performance.now();
         const quantizedFrame = Math.floor(
           targetFrame / FAST_SCRUB_BACKWARD_RENDER_QUANTIZE_FRAMES
@@ -3607,7 +4161,12 @@ export const VideoPreview = memo(function VideoPreview({
     // cached bitmap for the current frame.
     const unsubscribeGizmo = useGizmoStore.subscribe((state, prev) => {
       if (shouldPreferPlayerForPreview(usePlaybackStore.getState().previewFrame)) return;
-      if (!forceFastScrubOverlay && !isGizmoInteractingRef.current) return;
+      // Without forceFastScrubOverlay, gizmo previews (transform, crop, etc.)
+      // are handled by the DOM Player through React props. Activating the
+      // overlay here would switch from browser video seek (±1 frame) to
+      // mediabunny (exact), causing a visible frame shift — especially at
+      // soft-edge crop boundaries where the content difference is amplified.
+      if (!forceFastScrubOverlay) return;
       const unifiedPreviewChanged = state.preview !== prev.preview;
       const transformPreviewChanged = state.previewTransform !== prev.previewTransform;
       // Gizmo transform changes require an active gizmo; effect preview changes don't.
@@ -3621,7 +4180,7 @@ export const VideoPreview = memo(function VideoPreview({
       // Invalidate before requesting a repaint so gizmo resize/translate and
       // live panel previews re-composite immediately.
       if ((unifiedPreviewChanged || transformPreviewChanged) && scrubRendererRef.current) {
-        scrubRendererRef.current.invalidateFrameCache([currentFrame]);
+        scrubRendererRef.current.invalidateFrameCache({ frames: [currentFrame] });
       }
 
       scrubRequestedFrameRef.current = currentFrame;
@@ -3631,12 +4190,13 @@ export const VideoPreview = memo(function VideoPreview({
     // During corner pin drag, re-render with the live preview values so the
     // scrub overlay reflects the warp in real-time instead of waiting for commit.
     const unsubscribeCornerPin = useCornerPinStore.subscribe((state, prev) => {
-      if (!forceFastScrubOverlay) return;
       if (state.previewCornerPin === prev.previewCornerPin) return;
+      const playbackState = usePlaybackStore.getState();
+      if (!forceFastScrubOverlay && !isPausedTransitionOverlayActive(playbackState.currentFrame, playbackState)) return;
 
-      const currentFrame = usePlaybackStore.getState().currentFrame;
+      const currentFrame = playbackState.currentFrame;
       if (scrubRendererRef.current) {
-        scrubRendererRef.current.invalidateFrameCache([currentFrame]);
+        scrubRendererRef.current.invalidateFrameCache({ frames: [currentFrame] });
       }
       scrubRequestedFrameRef.current = currentFrame;
       void pumpRenderLoop();
@@ -3648,11 +4208,12 @@ export const VideoPreview = memo(function VideoPreview({
       if (!previewVerticesChanged && !editingItemChanged) return;
 
       const playbackState = usePlaybackStore.getState();
+      if (shouldPreferPlayerForPreview(playbackState.previewFrame)) return;
       const targetFrame = playbackState.previewFrame ?? playbackState.currentFrame;
-      if (!forceFastScrubOverlay && playbackState.previewFrame === null) return;
+      if (!forceFastScrubOverlay && playbackState.previewFrame === null && !isPausedTransitionOverlayActive(targetFrame, playbackState)) return;
 
       if (scrubRendererRef.current) {
-        scrubRendererRef.current.invalidateFrameCache([targetFrame]);
+        scrubRendererRef.current.invalidateFrameCache({ frames: [targetFrame] });
       }
       scrubRequestedFrameRef.current = targetFrame;
       void pumpRenderLoop();
@@ -3678,7 +4239,9 @@ export const VideoPreview = memo(function VideoPreview({
       }
     }
     if (!initialPlaybackState.isPlaying && initialPlaybackState.previewFrame === null) {
-      const pausedPrewarmStartFrame = getPausedTransitionPrewarmStartFrame(initialPlaybackState.currentFrame);
+      const initialPausedActiveWindow = getTransitionWindowForFrame(initialPlaybackState.currentFrame);
+      const pausedPrewarmStartFrame = initialPausedActiveWindow?.startFrame
+        ?? getPausedTransitionPrewarmStartFrame(initialPlaybackState.currentFrame);
       if (pausedPrewarmStartFrame !== null) {
         lastPausedPrearmTargetRef.current = pausedPrewarmStartFrame;
         if (forceFastScrubOverlay) {
@@ -3716,6 +4279,10 @@ export const VideoPreview = memo(function VideoPreview({
               }
             })();
           }
+        } else if (initialPausedActiveWindow) {
+          // Paused INSIDE a transition on initial mount — pin session and
+          // render so the GPU transition is visible without forceFastScrubOverlay.
+          pinTransitionPlaybackSession(initialPausedActiveWindow);
         } else {
           schedulePlaybackTransitionPrepare(pausedPrewarmStartFrame);
         }
@@ -3723,6 +4290,13 @@ export const VideoPreview = memo(function VideoPreview({
           targetFrame: pausedPrewarmStartFrame,
         });
       }
+    }
+
+    // Paused inside a transition on initial mount — trigger a render so
+    // the GPU transition is visible without forceFastScrubOverlay.
+    if (isPausedTransitionOverlayActive(initialPlaybackState.currentFrame, initialPlaybackState)) {
+      scrubRequestedFrameRef.current = initialPlaybackState.currentFrame;
+      void pumpRenderLoop();
     }
 
     if (
@@ -3741,7 +4315,7 @@ export const VideoPreview = memo(function VideoPreview({
       }
       scrubRequestedFrameRef.current = initialPlaybackState.previewFrame;
       void pumpRenderLoop();
-    } else if (forceFastScrubOverlay || (isGizmoInteracting && !preferPlayerForTextGizmo)) {
+    } else if (forceFastScrubOverlay) {
       const playbackState = usePlaybackStore.getState();
       const playbackTransitionState = getPlaybackTransitionStateForFrame(playbackState.currentFrame);
       if (playbackState.isPlaying && playbackTransitionState.shouldPrewarm && playbackTransitionState.nextTransitionStartFrame !== null) {
@@ -3840,11 +4414,7 @@ export const VideoPreview = memo(function VideoPreview({
     fastScrubBoundarySources,
     forceFastScrubOverlay,
     fps,
-    // Re-run when gizmo interaction toggles so drag overlays are requested
-    // immediately on interaction start/end.
-    isGizmoInteracting,
     preferPlayerForStyledTextScrub,
-    preferPlayerForTextGizmo,
     clearPendingFastScrubHandoff,
     clearTransitionPlaybackSession,
     getPausedTransitionPrewarmStartFrame,
@@ -3852,6 +4422,7 @@ export const VideoPreview = memo(function VideoPreview({
     getTransitionWindowForFrame,
     hideFastScrubOverlay,
     hidePlaybackTransitionOverlay,
+    isPausedTransitionOverlayActive,
     pinTransitionPlaybackSession,
     preparePlaybackTransitionFrame,
     showPlaybackTransitionOverlayForFrame,
@@ -4654,6 +5225,26 @@ export const VideoPreview = memo(function VideoPreview({
                       <span style={{ color: '#fbbf24' }}> {p.sourceWarmEvictions} evict</span>
                     )}
                   </div>
+
+                  {/* Preseek worker */}
+                  {(p.preseekRequests > 0 || p.preseekCachedBitmaps > 0) && (
+                    <div style={{ color: '#a1a1aa' }}>
+                      Preseek {p.preseekCacheHits + p.preseekInflightReuses}/{p.preseekRequests} hit
+                      {' '}post {p.preseekWorkerSuccesses}/{p.preseekWorkerPosts}
+                      {' '}cache {p.preseekCachedBitmaps}
+                      {p.preseekWaitMatches > 0 && (
+                        <span>
+                          {' '}wait {p.preseekWaitResolved}/{p.preseekWaitMatches}
+                        </span>
+                      )}
+                      {p.preseekWorkerFailures > 0 && (
+                        <span style={{ color: '#fbbf24' }}> {p.preseekWorkerFailures} fail</span>
+                      )}
+                      {p.preseekWaitTimeouts > 0 && (
+                        <span style={{ color: '#fbbf24' }}> {p.preseekWaitTimeouts} timeout</span>
+                      )}
+                    </div>
+                  )}
 
                   {/* Media resolution */}
                   {(p.unresolvedQueue > 0 || p.pendingResolves > 0) && (

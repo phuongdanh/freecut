@@ -20,6 +20,10 @@ interface GraphKeyframeProps {
   onClick?: (point: GraphKeyframePoint, event: React.MouseEvent) => void;
   /** Callback when point is double-clicked */
   onDoubleClick?: (point: GraphKeyframePoint, event: React.MouseEvent) => void;
+  /** How to display time in the drag tooltip */
+  rulerUnit?: 'frames' | 'seconds';
+  /** FPS for seconds conversion */
+  fps?: number;
   /** Whether the graph is disabled */
   disabled?: boolean;
 }
@@ -35,6 +39,8 @@ const GraphKeyframe = memo(function GraphKeyframe({
   onPointerDown,
   onClick,
   onDoubleClick,
+  rulerUnit = 'frames',
+  fps = 30,
   disabled = false,
 }: GraphKeyframeProps) {
   const handlePointerDown = useCallback(
@@ -65,10 +71,11 @@ const GraphKeyframe = memo(function GraphKeyframe({
   );
 
   const halfSize = size / 2;
+  const showDragPreview = point.isDragging || previewValue !== null;
 
   // Use preview values when dragging, otherwise use current keyframe values
-  const displayFrame = point.isDragging && previewValue ? previewValue.frame : point.keyframe.frame;
-  const displayValue = point.isDragging && previewValue ? previewValue.value : point.keyframe.value;
+  const displayFrame = previewValue ? previewValue.frame : point.keyframe.frame;
+  const displayValue = previewValue ? previewValue.value : point.keyframe.value;
 
   const cursorStyle = disabled ? 'default' : 'pointer';
 
@@ -111,15 +118,15 @@ const GraphKeyframe = memo(function GraphKeyframe({
           L ${point.x - halfSize} ${point.y}
           Z
         `}
-        fill={point.isDragging ? '#3b82f6' : point.isSelected ? '#3b82f6' : '#f97316'}
+        fill={showDragPreview ? '#3b82f6' : point.isSelected ? '#3b82f6' : '#f97316'}
         stroke="#1a1a1a"
         strokeWidth={2}
         style={{ pointerEvents: 'none' }}
       />
 
       {/* Value tooltip when dragging - shows TARGET values */}
-      {point.isDragging && (
-        <g style={{ pointerEvents: 'none' }}>
+      {showDragPreview && (
+        <g data-testid={`graph-keyframe-tooltip-${point.keyframe.id}`} style={{ pointerEvents: 'none' }}>
           <rect
             x={point.x + 12}
             y={point.y - 24}
@@ -138,7 +145,7 @@ const GraphKeyframe = memo(function GraphKeyframe({
             fontSize={11}
             fontFamily="monospace"
           >
-            {`F${displayFrame} → ${formatKeyframeValue(displayValue)}`}
+            {formatDragTooltip(displayFrame, displayValue, rulerUnit, fps)}
           </text>
         </g>
       )}
@@ -156,6 +163,8 @@ export const GraphKeyframes = memo(function GraphKeyframes({
   onPointerDown,
   onClick,
   onDoubleClick,
+  rulerUnit,
+  fps,
   disabled = false,
 }: {
   points: GraphKeyframePoint[];
@@ -164,6 +173,8 @@ export const GraphKeyframes = memo(function GraphKeyframes({
   onPointerDown?: (point: GraphKeyframePoint, event: React.PointerEvent) => void;
   onClick?: (point: GraphKeyframePoint, event: React.MouseEvent) => void;
   onDoubleClick?: (point: GraphKeyframePoint, event: React.MouseEvent) => void;
+  rulerUnit?: 'frames' | 'seconds';
+  fps?: number;
   disabled?: boolean;
 }) {
   return (
@@ -177,6 +188,8 @@ export const GraphKeyframes = memo(function GraphKeyframes({
           onPointerDown={onPointerDown}
           onClick={onClick}
           onDoubleClick={onDoubleClick}
+          rulerUnit={rulerUnit}
+          fps={fps}
           disabled={disabled}
         />
       ))}
@@ -187,6 +200,17 @@ export const GraphKeyframes = memo(function GraphKeyframes({
 /**
  * Format a keyframe value for display.
  */
+function formatDragTooltip(
+  frame: number, value: number,
+  rulerUnit: 'frames' | 'seconds', fps: number
+): string {
+  const timePart = rulerUnit === 'seconds' && fps > 0
+    ? `${(frame / fps).toFixed(2)}s`
+    : `${frame}`;
+
+  return `${timePart}  ${formatKeyframeValue(value)}`;
+}
+
 function formatKeyframeValue(value: number): string {
   if (Math.abs(value) >= 100) {
     return value.toFixed(0);

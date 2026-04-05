@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { createLogger } from '@/shared/logging/logger';
+import { registerObjectUrl, unregisterObjectUrl } from './object-url-registry';
 
 const logger = createLogger('BlobUrlManager');
 
@@ -51,6 +52,7 @@ class BlobUrlManager {
     }
 
     const url = URL.createObjectURL(blob);
+    registerObjectUrl(url, blob);
     this.entries.set(mediaId, { url, refCount: 1 });
     this.notify();
     return url;
@@ -78,6 +80,7 @@ class BlobUrlManager {
   invalidate(mediaId: string): void {
     const entry = this.entries.get(mediaId);
     if (!entry) return;
+    unregisterObjectUrl(entry.url);
     URL.revokeObjectURL(entry.url);
     this.entries.delete(mediaId);
     this.notify();
@@ -93,6 +96,7 @@ class BlobUrlManager {
 
     entry.refCount--;
     if (entry.refCount <= 0) {
+      unregisterObjectUrl(entry.url);
       URL.revokeObjectURL(entry.url);
       this.entries.delete(mediaId);
       this.notify();
@@ -107,6 +111,7 @@ class BlobUrlManager {
    */
   invalidateAll(): void {
     for (const entry of this.entries.values()) {
+      unregisterObjectUrl(entry.url);
       URL.revokeObjectURL(entry.url);
     }
     this.entries.clear();
@@ -118,6 +123,7 @@ class BlobUrlManager {
    */
   releaseAll(): void {
     for (const [mediaId, entry] of this.entries) {
+      unregisterObjectUrl(entry.url);
       URL.revokeObjectURL(entry.url);
       logger.debug(`Revoked blob URL for media ${mediaId}`);
     }

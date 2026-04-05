@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { usePlaybackStore } from '@/shared/state/playback';
-import { formatTimecode } from '@/utils/time-utils';
+import { formatTimecodeCompact } from '@/utils/time-utils';
 
 interface TimecodeDisplayProps {
   fps: number;
@@ -20,9 +20,9 @@ export function TimecodeDisplay({ fps, totalFrames }: TimecodeDisplayProps) {
   const [showFrames, setShowFrames] = useState(false);
   const currentTimeRef = useRef<HTMLSpanElement>(null);
   const frameDigits = Math.max(totalFrames.toString().length, 1);
-  const reservedCharWidth = Math.max(frameDigits, 11);
+  const reservedCharWidth = Math.max(frameDigits, 8);
   const lastFrame = Math.max(0, totalFrames - 1);
-  const reservedDisplayWidth = `calc(${reservedCharWidth * 2 + 1}ch + 1rem)`;
+  const reservedDisplayWidth = `calc(${reservedCharWidth * 2 + 1}ch + 0.75rem)`;
 
   // Use refs for values accessed in subscription to avoid stale closures
   const showFramesRef = useRef(showFrames);
@@ -44,7 +44,7 @@ export function TimecodeDisplay({ fps, totalFrames }: TimecodeDisplayProps) {
       if (!currentTimeRef.current) return;
       currentTimeRef.current.textContent = showFramesRef.current
         ? formatFrameNumber(frame)
-        : formatTimecode(frame, fpsRef.current);
+        : formatTimecodeCompact(frame, fpsRef.current);
     };
 
     // Initial update
@@ -62,13 +62,13 @@ export function TimecodeDisplay({ fps, totalFrames }: TimecodeDisplayProps) {
     const frame = usePlaybackStore.getState().currentFrame;
     currentTimeRef.current.textContent = showFrames
       ? formatFrameNumber(frame)
-      : formatTimecode(frame, fps);
+      : formatTimecodeCompact(frame, fps);
   }, [showFrames, fps, formatFrameNumber]);
 
   return (
     <button
       type="button"
-      className="inline-flex items-center gap-2 bg-transparent p-0 font-mono text-[13px] tabular-nums text-left transition-colors select-none text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+      className="inline-flex items-center gap-1.5 bg-transparent p-0 font-mono text-[11px] tabular-nums text-left transition-colors select-none text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
       style={{ width: reservedDisplayWidth }}
       onClick={() => setShowFrames((prev) => !prev)}
     >
@@ -76,11 +76,11 @@ export function TimecodeDisplay({ fps, totalFrames }: TimecodeDisplayProps) {
         ref={currentTimeRef}
         className="text-primary font-semibold"
       >
-        {showFrames ? formatFrameNumber(usePlaybackStore.getState().currentFrame) : formatTimecode(usePlaybackStore.getState().currentFrame, fps)}
+        {showFrames ? formatFrameNumber(usePlaybackStore.getState().currentFrame) : formatTimecodeCompact(usePlaybackStore.getState().currentFrame, fps)}
       </span>
       <span className="text-muted-foreground/50">/</span>
       <span>
-        {showFrames ? formatFrameNumber(lastFrame) : formatTimecode(lastFrame, fps)}
+        {showFrames ? formatFrameNumber(lastFrame) : formatTimecodeCompact(lastFrame, fps)}
       </span>
     </button>
   );

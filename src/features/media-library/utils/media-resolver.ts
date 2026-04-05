@@ -3,6 +3,7 @@ import { useMediaLibraryStore } from '@/features/media-library/stores/media-libr
 import { proxyService } from '@/features/media-library/services/proxy-service';
 import { getSharedProxyKey } from '@/features/media-library/utils/proxy-key';
 import { blobUrlManager } from '@/infrastructure/browser/blob-url-manager';
+import { registerKeyframeIndex } from '@/shared/utils/keyframe-index-registry';
 import type { TimelineTrack } from '@/types/timeline';
 import { createLogger } from '@/shared/logging/logger';
 
@@ -52,7 +53,14 @@ export async function resolveMediaUrl(mediaId: string): Promise<string> {
       }
 
       // Acquire blob URL through centralized manager (handles caching + ref counting)
-      return blobUrlManager.acquire(mediaId, blob);
+      const blobUrl = blobUrlManager.acquire(mediaId, blob);
+
+      // Register keyframe index for adaptive seek backtracking
+      if (media.keyframeTimestamps && media.keyframeTimestamps.length > 0) {
+        registerKeyframeIndex(blobUrl, media.keyframeTimestamps);
+      }
+
+      return blobUrl;
     } catch (error) {
       logger.error(`Failed to resolve media ${mediaId}:`, error);
 

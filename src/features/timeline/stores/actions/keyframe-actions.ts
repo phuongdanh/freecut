@@ -7,7 +7,7 @@ import type { KeyframeAddPayload, KeyframeUpdatePayload } from '../keyframes-sto
 import type { AutoKeyframeOperation } from '@/features/timeline/deps/keyframes';
 import { useKeyframesStore } from '../keyframes-store';
 import { useTimelineSettingsStore } from '../timeline-settings-store';
-import { execute, logger, canAddKeyframeAtFrame } from './shared';
+import { execute, getLogger, canAddKeyframeAtFrame } from './shared';
 
 export function addKeyframe(
   itemId: string,
@@ -18,7 +18,7 @@ export function addKeyframe(
 ): string {
   // Validate: keyframes cannot be added in transition regions
   if (!canAddKeyframeAtFrame(itemId, frame)) {
-    logger.warn('Cannot add keyframe in transition region', { itemId, property, frame });
+    getLogger().warn('Cannot add keyframe in transition region', { itemId, property, frame });
     return '';
   }
 
@@ -40,12 +40,12 @@ export function addKeyframes(payloads: KeyframeAddPayload[]): string[] {
   const validPayloads = payloads.filter((p) => canAddKeyframeAtFrame(p.itemId, p.frame));
 
   if (validPayloads.length === 0) {
-    logger.warn('All keyframes blocked by transition regions', { originalCount: payloads.length });
+    getLogger().warn('All keyframes blocked by transition regions', { originalCount: payloads.length });
     return [];
   }
 
   if (validPayloads.length < payloads.length) {
-    logger.warn('Some keyframes blocked by transition regions', {
+    getLogger().warn('Some keyframes blocked by transition regions', {
       originalCount: payloads.length,
       validCount: validPayloads.length,
     });
@@ -65,7 +65,7 @@ export function updateKeyframe(
   updates: Partial<Omit<Keyframe, 'id'>>
 ): void {
   if (typeof updates.frame === 'number' && !canAddKeyframeAtFrame(itemId, updates.frame)) {
-    logger.warn('Cannot move keyframe into transition region', {
+    getLogger().warn('Cannot move keyframe into transition region', {
       itemId,
       property,
       keyframeId,
@@ -90,7 +90,7 @@ export function updateKeyframes(updates: KeyframeUpdatePayload[]): void {
 
     const allowed = canAddKeyframeAtFrame(update.itemId, update.updates.frame);
     if (!allowed) {
-      logger.warn('Cannot move keyframe into transition region', {
+      getLogger().warn('Cannot move keyframe into transition region', {
         itemId: update.itemId,
         property: update.property,
         keyframeId: update.keyframeId,
@@ -131,7 +131,7 @@ export function applyAutoKeyframeOperations(operations: AutoKeyframeOperation[])
       }
 
       if (!canAddKeyframeAtFrame(operation.itemId, operation.frame)) {
-        logger.warn('Cannot add auto keyframe in transition region', {
+        getLogger().warn('Cannot add auto keyframe in transition region', {
           itemId: operation.itemId,
           property: operation.property,
           frame: operation.frame,

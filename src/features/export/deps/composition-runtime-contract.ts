@@ -9,9 +9,12 @@ export {
 } from '@/features/composition-runtime/utils/transform-resolver';
 export {
   applyTransformOverride,
+  createFrameCompositionSceneCache,
   resolveItemTransformAtFrame,
   resolveActiveShapeMasksAtFrame,
   resolveFrameCompositionScene,
+  resolveFrameCompositionSceneCached,
+  invalidateFrameSceneCache,
 } from '@/features/composition-runtime/utils/frame-scene';
 export {
   applyPreviewPathVerticesToItem,

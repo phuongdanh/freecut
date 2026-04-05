@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Dialog,
   DialogContent,
@@ -30,7 +30,14 @@ import { useClientRender } from '../hooks/use-client-render';
 import { useProjectStore } from '@/features/export/deps/projects';
 import { useTimelineStore } from '@/features/export/deps/timeline';
 import { formatTimecode, framesToSeconds } from '@/utils/time-utils';
-import type { ClientVideoContainer, ClientAudioContainer } from '../utils/client-renderer';
+import {
+  getCompatibleVideoCodecs,
+  getDefaultVideoCodec,
+  mapExportCodecToClientCodec,
+  type ClientCodec,
+  type ClientVideoContainer,
+  type ClientAudioContainer,
+} from '../utils/client-renderer';
 import { ExportPreviewPlayer } from './export-preview-player';
 
 export interface ExportDialogProps {
@@ -39,6 +46,34 @@ export interface ExportDialogProps {
 }
 
 type DialogView = 'settings' | 'progress' | 'complete' | 'error' | 'cancelled';
+
+type VideoContainerOption = {
+  value: ClientVideoContainer;
+  label: string;
+  description: string;
+  supported: boolean;
+};
+
+type VideoCodecOption = {
+  value: ExportSettings['codec'];
+  label: string;
+  supported: boolean;
+};
+
+const VIDEO_CODEC_LABELS: Record<string, string> = {
+  h264: 'H.264',
+  h265: 'H.265/HEVC',
+  vp8: 'VP8',
+  vp9: 'VP9',
+  av1: 'AV1',
+};
+
+const VIDEO_CONTAINER_DESCRIPTIONS: Record<ClientVideoContainer, string> = {
+  mp4: 'Most compatible, H.264/H.265',
+  mov: 'Best for macOS/iOS',
+  webm: 'Web-optimized, VP8/VP9/AV1',
+  mkv: 'Flexible, H.264/H.265/VP8/VP9/AV1',
+};
 
 function formatTime(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
@@ -74,10 +109,15 @@ function getResolutionOptions(projectWidth: number, projectHeight: number) {
   });
 }
 
+function getDefaultCodecForFormat(
+  format: 'mp4' | 'webm'
+): ExportSettings['codec'] {
+  return getDefaultVideoCodec(format);
+}
+
 export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const projectWidth = useProjectStore((s) => s.currentProject?.metadata.width ?? 1920);
   const projectHeight = useProjectStore((s) => s.currentProject?.metadata.height ?? 1080);
-
   // Timeline state for in/out points and duration calculation
   const fps = useTimelineStore((s) => s.fps);
   const items = useTimelineStore((s) => s.items);
@@ -85,7 +125,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const outPoint = useTimelineStore((s) => s.outPoint);
 
   const [settings, setSettings] = useState<ExportSettings>({
-    codec: 'h264',
+    codec: getDefaultCodecForFormat('mp4'),
     quality: 'high',
     resolution: { width: projectWidth, height: projectHeight },
   });
@@ -97,6 +137,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [renderWholeProject, setRenderWholeProject] = useState(false);
+  const wasOpenRef = useRef(false);
 
   // Calculate timeline duration from items
   const timelineDurationFrames = useMemo(() => {
@@ -142,7 +183,13 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
     startExport,
     cancelExport,
     downloadVideo,
+    resetState,
+    getSupportedCodecs,
   } = clientRender;
+
+  const [supportedVideoCodecs, setSupportedVideoCodecs] = useState<ClientCodec[] | null>(null);
+  const [isCheckingVideoSupport, setIsCheckingVideoSupport] = useState(false);
+  const [videoSupportError, setVideoSupportError] = useState<string | null>(null);
 
   // Track elapsed time
   useEffect(() => {
@@ -180,7 +227,7 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
   const handleClose = () => {
     if (view === 'progress') return; // Prevent closing during export
     setView('settings');
-    clientRender.resetState();
+    resetState();
     onClose();
   };
 
@@ -200,59 +247,131 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
 
   // Reset when dialog closes
   useEffect(() => {
-    if (!open) {
+    if (open && !wasOpenRef.current) {
       setView('settings');
-      clientRender.resetState();
+      setExportMode('video');
+      setVideoContainer('mp4');
+      setAudioContainer('mp3');
+      setRenderWholeProject(false);
+      setSettings({
+        codec: getDefaultCodecForFormat('mp4'),
+        quality: 'high',
+        resolution: { width: projectWidth, height: projectHeight },
+      });
+      resetState();
       setStartTime(null);
       setElapsedSeconds(0);
     }
-  }, [open, clientRender]);
 
-  const getCodecOptions = () => {
-    switch (videoContainer) {
-      case 'mp4':
-      case 'mov':
-        return [
-          { value: 'h264', label: 'H.264' },
-          { value: 'h265', label: 'H.265/HEVC' },
-        ];
-      case 'webm':
-        return [
-          { value: 'vp8', label: 'VP8' },
-          { value: 'vp9', label: 'VP9' },
-        ];
-      case 'mkv':
-        return [
-          { value: 'h264', label: 'H.264' },
-          { value: 'h265', label: 'H.265/HEVC' },
-          { value: 'vp8', label: 'VP8' },
-          { value: 'vp9', label: 'VP9' },
-        ];
-      default:
-        return [{ value: 'h264', label: 'H.264' }];
+    if (!open && wasOpenRef.current) {
+      setView('settings');
+      resetState();
+      setStartTime(null);
+      setElapsedSeconds(0);
     }
-  };
 
-  const getVideoContainerOptions = () => [
-    { value: 'mp4', label: 'MP4', description: 'Most compatible, H.264/H.265' },
-    { value: 'mov', label: 'QuickTime (MOV)', description: 'Best for macOS/iOS' },
-    { value: 'webm', label: 'WebM', description: 'Web-optimized, VP8/VP9' },
-    { value: 'mkv', label: 'Matroska (MKV)', description: 'Flexible, all codecs' },
-  ];
+    wasOpenRef.current = open;
+  }, [open, projectHeight, projectWidth, resetState]);
 
   const getAudioContainerOptions = () => [
     { value: 'mp3', label: 'MP3', description: 'Universal, small files' },
     { value: 'aac', label: 'AAC', description: 'High quality, compact' },
-    { value: 'wav', label: 'WAV', description: 'Lossless, large files' },
+    { value: 'wav', label: 'WAV', description: 'Lossless PCM, large files' },
   ];
 
-  // Reset codec when container changes to ensure compatibility
   useEffect(() => {
-    const validCodecs = getCodecOptions().map((o) => o.value);
-    if (!validCodecs.includes(settings.codec)) {
-      setSettings((prev) => ({ ...prev, codec: validCodecs[0] as ExportSettings['codec'] }));
+    if (!open || view !== 'settings' || exportMode !== 'video') return;
+
+    let cancelled = false;
+    setIsCheckingVideoSupport(true);
+    setVideoSupportError(null);
+    setSupportedVideoCodecs(null);
+
+    void getSupportedCodecs({
+      resolution: settings.resolution,
+      quality: settings.quality,
+    })
+      .then((codecs) => {
+        if (cancelled) return;
+        setSupportedVideoCodecs(codecs);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : 'Unable to verify codec support';
+        setVideoSupportError(message);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsCheckingVideoSupport(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    exportMode,
+    getSupportedCodecs,
+    open,
+    settings.resolution.height,
+    settings.resolution.width,
+    settings.quality,
+    view,
+  ]);
+
+  const videoContainerOptions = useMemo<VideoContainerOption[]>(() => {
+    const allContainers: ClientVideoContainer[] = ['mp4', 'mov', 'webm', 'mkv'];
+
+    return allContainers.map((container) => {
+      const supported = supportedVideoCodecs === null
+        ? true
+        : getCompatibleVideoCodecs(container)
+            .map((codec) => mapExportCodecToClientCodec(codec))
+            .some((codec) => supportedVideoCodecs.includes(codec));
+
+      return {
+        value: container,
+        label: container === 'mov' ? 'QuickTime (MOV)' : container.toUpperCase(),
+        description: VIDEO_CONTAINER_DESCRIPTIONS[container],
+        supported,
+      };
+    });
+  }, [supportedVideoCodecs]);
+
+  const codecOptions = useMemo<VideoCodecOption[]>(() => {
+    return getCompatibleVideoCodecs(videoContainer).map((codec) => ({
+      value: codec,
+      label: VIDEO_CODEC_LABELS[codec],
+      supported: supportedVideoCodecs === null
+        ? true
+        : supportedVideoCodecs.includes(mapExportCodecToClientCodec(codec)),
+    }));
+  }, [supportedVideoCodecs, videoContainer]);
+
+  const hasCapabilityData = supportedVideoCodecs !== null && !videoSupportError;
+  const hasSupportedVideoPath = videoContainerOptions.some((option) => option.supported);
+
+  useEffect(() => {
+    if (exportMode !== 'video' || !hasCapabilityData) return;
+
+    const firstSupportedContainer = videoContainerOptions.find((option) => option.supported)?.value;
+    if (!firstSupportedContainer) return;
+    if (!videoContainerOptions.some((option) => option.value === videoContainer && option.supported)) {
+      setVideoContainer(firstSupportedContainer);
     }
-  }, [videoContainer]);
+  }, [exportMode, hasCapabilityData, videoContainer, videoContainerOptions]);
+
+  useEffect(() => {
+    const validCodecs = codecOptions
+      .filter((option) => option.supported)
+      .map((option) => option.value);
+
+    if (!validCodecs.includes(settings.codec)) {
+      const fallbackCodec = validCodecs[0] ?? codecOptions[0]?.value;
+      if (!fallbackCodec) return;
+      setSettings((prev) => ({ ...prev, codec: fallbackCodec as ExportSettings['codec'] }));
+    }
+  }, [codecOptions, settings.codec]);
 
   const preventClose = view === 'progress' || view === 'complete';
   const fileSize = clientRender.result?.fileSize;
@@ -422,6 +541,24 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
             {exportMode === 'video' && (
               <>
                 <div className="space-y-4">
+                  {!isCheckingVideoSupport && videoSupportError && (
+                    <Alert>
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertDescription>
+                        Could not verify browser codec support. Export will validate again when rendering starts.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+
+                  {!isCheckingVideoSupport && !videoSupportError && !hasSupportedVideoPath && (
+                    <Alert>
+                      <AlertCircle className="h-4 w-4" />
+                      <AlertDescription>
+                        This browser cannot encode video at {settings.resolution.width}x{settings.resolution.height}. Try a lower resolution or another browser.
+                      </AlertDescription>
+                    </Alert>
+                  )}
+
                   <div className="space-y-2">
                     <Label htmlFor="container">Format</Label>
                     <Select
@@ -432,10 +569,12 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
                         <SelectValue placeholder="Select format" />
                       </SelectTrigger>
                       <SelectContent>
-                        {getVideoContainerOptions().map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
+                        {videoContainerOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value} disabled={!option.supported}>
                             <span>{option.label}</span>
-                            <span className="ml-2 text-xs text-muted-foreground">{option.description}</span>
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              {option.description}
+                            </span>
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -452,8 +591,8 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
                         <SelectValue placeholder="Select codec" />
                       </SelectTrigger>
                       <SelectContent>
-                        {getCodecOptions().map((option) => (
-                          <SelectItem key={option.value} value={option.value}>
+                        {codecOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value} disabled={!option.supported}>
                             {option.label}
                           </SelectItem>
                         ))}
@@ -560,7 +699,10 @@ export function ExportDialog({ open, onClose }: ExportDialogProps) {
               <Button variant="outline" onClick={handleClose}>
                 Cancel
               </Button>
-              <Button onClick={handleStartExport}>
+              <Button
+                onClick={handleStartExport}
+                disabled={exportMode === 'video' && (!hasSupportedVideoPath || isCheckingVideoSupport)}
+              >
                 {exportMode === 'audio' ? 'Export Audio' : 'Export Video'}
               </Button>
             </div>

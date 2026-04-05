@@ -44,11 +44,33 @@ interface MediabunnyCanvasSink {
   dispose?(): void;
 }
 
+interface MediabunnyPacketRetrievalOptions {
+  /** Skip loading packet data — only metadata (timestamp, type) */
+  metadataOnly?: boolean;
+  /** Verify key packets by inspecting bitstream (cannot combine with metadataOnly) */
+  verifyKeyPackets?: boolean;
+}
+
+interface MediabunnyEncodedPacket {
+  type: 'key' | 'delta';
+  timestamp: number;
+  duration: number;
+  close?(): void;
+}
+
+interface MediabunnyEncodedPacketSink {
+  getFirstKeyPacket(options?: MediabunnyPacketRetrievalOptions): Promise<MediabunnyEncodedPacket | null>;
+  getNextKeyPacket(packet: MediabunnyEncodedPacket, options?: MediabunnyPacketRetrievalOptions): Promise<MediabunnyEncodedPacket | null>;
+  packets(startTimestamp?: number, endTimestamp?: number): AsyncIterable<MediabunnyEncodedPacket>;
+  dispose?(): void;
+}
+
 interface MediabunnyModule {
   Input: new (config: { formats: unknown; source: unknown }) => MediabunnyInput;
   ALL_FORMATS: unknown;
   BlobSource: new (blob: Blob) => unknown;
   CanvasSink: new (track: MediabunnyVideoTrack, options: { width: number; height: number; fit: string }) => MediabunnyCanvasSink;
+  EncodedPacketSink: new (track: MediabunnyVideoTrack) => MediabunnyEncodedPacketSink;
 }
 
 // Message types
@@ -61,6 +83,7 @@ export interface ProcessMediaRequest {
     thumbnailMaxSize?: number;
     thumbnailQuality?: number;
     thumbnailTimestamp?: number;
+    generateThumbnail?: boolean;
   };
 }
 
@@ -82,6 +105,10 @@ export interface VideoMetadata {
   bitrate: number;
   audioCodec?: string;
   audioCodecSupported: boolean;
+  /** Sorted keyframe timestamps in seconds (undefined if all-intra or extraction failed) */
+  keyframeTimestamps?: number[];
+  /** Average keyframe interval in seconds (GOP length) */
+  gopInterval?: number;
 }
 
 export interface AudioMetadata {
@@ -130,6 +157,47 @@ async function getMediabunny(): Promise<MediabunnyModule> {
 }
 
 /**
+ * Extract keyframe timestamps using mediabunny's EncodedPacketSink.
+ *
+ * Uses getFirstKeyPacket/getNextKeyPacket chain with metadataOnly: true
+ * to jump directly from keyframe to keyframe without loading packet data.
+ * This is O(K) where K = number of keyframes, vs O(N) for iterating all
+ * packets. For a 1-hour video: ~1800 keyframe hops vs ~108,000 packet reads.
+ *
+ * Returns undefined if extraction fails or all frames are keyframes
+ * (all-intra content where no seek optimization is needed).
+ */
+async function extractKeyframeTimestamps(
+  mb: MediabunnyModule,
+  videoTrack: MediabunnyVideoTrack,
+): Promise<number[] | undefined> {
+  let sink: MediabunnyEncodedPacketSink | null = null;
+  try {
+    sink = new mb.EncodedPacketSink(videoTrack);
+    const timestamps: number[] = [];
+    const metadataOnly = { metadataOnly: true } as const;
+
+    // Jump keyframe-to-keyframe — skips all delta packets entirely
+    let packet = await sink.getFirstKeyPacket(metadataOnly);
+    while (packet) {
+      timestamps.push(packet.timestamp);
+      packet = await sink.getNextKeyPacket(packet, metadataOnly);
+    }
+
+    if (timestamps.length === 0) {
+      return undefined;
+    }
+
+    return timestamps;
+  } catch (error) {
+    logger.warn('Keyframe extraction failed (non-fatal):', error);
+    return undefined;
+  } finally {
+    sink?.dispose?.();
+  }
+}
+
+/**
  * Extract video metadata using mediabunny
  */
 async function extractVideoMetadata(file: File): Promise<VideoMetadata> {
@@ -152,11 +220,21 @@ async function extractVideoMetadata(file: File): Promise<VideoMetadata> {
       throw new Error('No video track found in file');
     }
 
-    // Get FPS from packet stats
-    const packetStats = await videoTrack.computePacketStats(50);
+    // Get FPS and keyframe index in parallel with packet stats
+    const [packetStats, keyframeTimestamps] = await Promise.all([
+      videoTrack.computePacketStats(50),
+      extractKeyframeTimestamps(mb, videoTrack),
+    ]);
 
     const audioCodec = audioTrack?.codec;
     const audioCodecSupported = isAudioCodecSupported(audioCodec);
+
+    // Compute average GOP interval from keyframe timestamps
+    let gopInterval: number | undefined;
+    if (keyframeTimestamps && keyframeTimestamps.length >= 2) {
+      const totalSpan = keyframeTimestamps[keyframeTimestamps.length - 1]! - keyframeTimestamps[0]!;
+      gopInterval = totalSpan / (keyframeTimestamps.length - 1);
+    }
 
     return {
       type: 'video',
@@ -168,6 +246,8 @@ async function extractVideoMetadata(file: File): Promise<VideoMetadata> {
       bitrate: 0,
       audioCodec,
       audioCodecSupported,
+      keyframeTimestamps,
+      gopInterval,
     };
   } finally {
     input.dispose();
@@ -205,9 +285,47 @@ async function extractAudioMetadata(file: File): Promise<AudioMetadata> {
 }
 
 /**
- * Extract image metadata using createImageBitmap
+ * Parse SVG dimensions from XML content.
+ * Tries width/height attributes first, then viewBox.
  */
-async function extractImageMetadata(file: File): Promise<ImageMetadata> {
+function parseSvgDimensions(svgText: string): { width: number; height: number } | null {
+  const svgMatch = svgText.match(/<svg[^>]*>/i);
+  if (!svgMatch) return null;
+
+  const tag = svgMatch[0];
+
+  // Match numeric lengths only (with optional "px" unit), reject %, em, etc.
+  const wAttr = tag.match(/\bwidth=["'](\d+(?:\.\d+)?)\s*(?:px)?["']/);
+  const hAttr = tag.match(/\bheight=["'](\d+(?:\.\d+)?)\s*(?:px)?["']/);
+  if (wAttr && hAttr) {
+    return { width: Math.round(parseFloat(wAttr[1]!)), height: Math.round(parseFloat(hAttr[1]!)) };
+  }
+
+  // viewBox: allow negative min-x/min-y, flexible whitespace (spaces or commas)
+  const vb = tag.match(/viewBox=["']\s*(-?[\d.]+)[\s,]+(-?[\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/);
+  if (vb) {
+    return { width: Math.round(parseFloat(vb[3]!)), height: Math.round(parseFloat(vb[4]!)) };
+  }
+
+  return null;
+}
+
+/**
+ * Extract image metadata using createImageBitmap.
+ * Falls back to SVG XML parsing for SVG files (createImageBitmap
+ * doesn't support SVGs in web workers).
+ */
+async function extractImageMetadata(file: File, mimeType: string): Promise<ImageMetadata> {
+  if (mimeType === 'image/svg+xml') {
+    const text = await file.text();
+    const dims = parseSvgDimensions(text);
+    return {
+      type: 'image',
+      width: dims?.width ?? 800,
+      height: dims?.height ?? 600,
+    };
+  }
+
   const bitmap = await createImageBitmap(file);
   const metadata: ImageMetadata = {
     type: 'image',
@@ -280,8 +398,15 @@ async function generateVideoThumbnail(
 async function generateImageThumbnail(
   file: File,
   maxSize: number,
-  quality: number
+  quality: number,
+  mimeType: string
 ): Promise<Blob> {
+  // SVG thumbnails can't be generated in workers (createImageBitmap doesn't
+  // support SVGs here). The main thread handles SVG thumbnail fallback.
+  if (mimeType === 'image/svg+xml') {
+    throw new Error('SVG thumbnail generation not supported in worker');
+  }
+
   const bitmap = await createImageBitmap(file);
 
   // Calculate dimensions preserving aspect ratio
@@ -368,6 +493,7 @@ async function processMedia(
     thumbnailMaxSize = 320,
     thumbnailQuality = 0.6,
     thumbnailTimestamp = 1,
+    generateThumbnail = true,
   } = options;
 
   let metadata: VideoMetadata | AudioMetadata | ImageMetadata;
@@ -376,24 +502,30 @@ async function processMedia(
   if (mimeType.startsWith('video/')) {
     // Video: extract metadata and generate thumbnail in parallel after metadata
     metadata = await extractVideoMetadata(file);
-    try {
-      thumbnail = await generateVideoThumbnail(file, thumbnailMaxSize, thumbnailQuality, thumbnailTimestamp);
-    } catch (err) {
-      logger.warn('Failed to generate video thumbnail:', err);
+    if (generateThumbnail) {
+      try {
+        thumbnail = await generateVideoThumbnail(file, thumbnailMaxSize, thumbnailQuality, thumbnailTimestamp);
+      } catch (err) {
+        logger.warn('Failed to generate video thumbnail:', err);
+      }
     }
   } else if (mimeType.startsWith('audio/')) {
     // Audio: metadata and thumbnail are independent
     const [audioMeta, audioThumb] = await Promise.all([
       extractAudioMetadata(file),
-      generateAudioThumbnail(file, thumbnailMaxSize, thumbnailQuality).catch(() => undefined),
+      generateThumbnail
+        ? generateAudioThumbnail(file, thumbnailMaxSize, thumbnailQuality).catch(() => undefined)
+        : Promise.resolve(undefined),
     ]);
     metadata = audioMeta;
     thumbnail = audioThumb;
   } else if (mimeType.startsWith('image/')) {
     // Image: metadata and thumbnail can run in parallel
     const [imageMeta, imageThumb] = await Promise.all([
-      extractImageMetadata(file),
-      generateImageThumbnail(file, thumbnailMaxSize, thumbnailQuality).catch(() => undefined),
+      extractImageMetadata(file, mimeType),
+      generateThumbnail
+        ? generateImageThumbnail(file, thumbnailMaxSize, thumbnailQuality, mimeType).catch(() => undefined)
+        : Promise.resolve(undefined),
     ]);
     metadata = imageMeta;
     thumbnail = imageThumb;

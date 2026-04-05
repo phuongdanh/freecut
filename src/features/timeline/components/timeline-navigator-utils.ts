@@ -1,3 +1,5 @@
+import { getTimelineRightScrollRoom, getTimelineWidth } from '../utils/timeline-layout';
+
 export type NavigatorDragTarget = 'left' | 'right';
 
 export interface NavigatorThumbMetricsInput {
@@ -24,7 +26,6 @@ export interface NavigatorResizeDragInput {
   trackWidth: number;
   viewportWidth: number;
   contentDuration: number;
-  rightPaddingPx?: number;
   minThumbWidth?: number;
 }
 
@@ -39,8 +40,6 @@ export interface NavigatorResizeDragResult {
 }
 
 const DEFAULT_MIN_THUMB_WIDTH = 40;
-const DEFAULT_RIGHT_PADDING_PX = 50;
-
 export function getNavigatorThumbMetrics({
   timelineWidth,
   viewportWidth,
@@ -78,7 +77,6 @@ export function getNavigatorResizeDragResult({
   trackWidth,
   viewportWidth,
   contentDuration,
-  rightPaddingPx = DEFAULT_RIGHT_PADDING_PX,
   minThumbWidth = DEFAULT_MIN_THUMB_WIDTH,
 }: NavigatorResizeDragInput): NavigatorResizeDragResult {
   const targetThumbWidth = dragTarget === 'left'
@@ -89,12 +87,14 @@ export function getNavigatorResizeDragResult({
     ? Math.max(viewportWidth, (viewportWidth * trackWidth) / targetThumbWidth)
     : Math.max(trackWidth, 1);
 
-  const desiredContentWidth = Math.max(0, desiredTimelineWidth - rightPaddingPx);
+  const rightScrollRoomPx = getTimelineRightScrollRoom(viewportWidth);
+  const desiredContentWidth = Math.max(0, desiredTimelineWidth - rightScrollRoomPx);
   const nextZoom = Math.max(0.01, Math.min(2, desiredContentWidth / (contentDuration * 100)));
   const nextContentWidth = contentDuration * nextZoom * 100;
-  const nextTimelineWidth = nextContentWidth > viewportWidth
-    ? nextContentWidth + rightPaddingPx
-    : Math.max(viewportWidth, nextContentWidth);
+  const nextTimelineWidth = getTimelineWidth({
+    contentWidth: nextContentWidth,
+    viewportWidth,
+  });
   const nextMaxScrollLeft = Math.max(0, nextTimelineWidth - viewportWidth);
   const nextThumbTravel = Math.max(0, trackWidth - targetThumbWidth);
   const fixedRightEdge = dragStartThumbLeft + dragStartThumbWidth;

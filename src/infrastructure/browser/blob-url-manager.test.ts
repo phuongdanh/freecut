@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { blobUrlManager } from './blob-url-manager';
+import { clearObjectUrlRegistry, getObjectUrlBlob } from './object-url-registry';
 
 // Mock URL.createObjectURL / revokeObjectURL
 let blobUrlCounter = 0;
@@ -7,6 +8,7 @@ const revokedUrls = new Set<string>();
 
 beforeEach(() => {
   blobUrlManager.releaseAll();
+  clearObjectUrlRegistry();
   blobUrlCounter = 0;
   revokedUrls.clear();
 
@@ -25,6 +27,13 @@ describe('BlobUrlManager', () => {
       const url = blobUrlManager.acquire('media-1', new Blob(['data']));
       expect(url).toBe('blob:mock-1');
       expect(blobUrlManager.size).toBe(1);
+    });
+
+    it('registers the blob for direct object URL lookup', () => {
+      const blob = new Blob(['data']);
+      const url = blobUrlManager.acquire('media-1', blob);
+
+      expect(getObjectUrlBlob(url)).toBe(blob);
     });
 
     it('returns the same URL for duplicate acquires', () => {
@@ -84,6 +93,14 @@ describe('BlobUrlManager', () => {
       expect(newUrl).toBe('blob:mock-2'); // new URL, not the old one
       expect(blobUrlManager.get('media-1')).toBe(newUrl);
     });
+
+    it('removes the object URL registry entry', () => {
+      const url = blobUrlManager.acquire('media-1', new Blob(['data']));
+
+      blobUrlManager.invalidate('media-1');
+
+      expect(getObjectUrlBlob(url)).toBeNull();
+    });
   });
 
   describe('release', () => {
@@ -97,6 +114,14 @@ describe('BlobUrlManager', () => {
     it('is a no-op for unknown mediaId', () => {
       blobUrlManager.release('unknown');
       expect(blobUrlManager.size).toBe(0);
+    });
+
+    it('removes the registry entry when refCount reaches zero', () => {
+      const url = blobUrlManager.acquire('media-1', new Blob(['data']));
+
+      blobUrlManager.release('media-1');
+
+      expect(getObjectUrlBlob(url)).toBeNull();
     });
   });
 

@@ -28,7 +28,7 @@ export interface Rect {
  */
 export interface MarqueeItem {
   id: string;
-  getBoundingRect: () => Rect;
+  getBoundingRect: () => Rect | null;
 }
 
 /**
@@ -192,6 +192,7 @@ export function useMarqueeSelection({
     const intersectingIds = currentItems
       .filter((item) => {
         const itemRect = item.getBoundingRect();
+        if (!itemRect) return false;
         return rectIntersects(marqueeRect, itemRect);
       })
       .map((item) => item.id);
@@ -245,12 +246,20 @@ export function useMarqueeSelection({
       target.closest('[data-item-id]') ||
       // Don't start marquee if clicking on a draggable media card
       target.closest('[data-media-id]') ||
+      // Don't start marquee if clicking on a draggable composition card
+      target.closest('[data-composition-id]') ||
       // Don't start marquee if clicking in the timeline ruler
       target.closest('.timeline-ruler') ||
       // Don't start marquee if clicking on the playhead handle
       target.closest('[data-playhead-handle]') ||
       // Don't start marquee if clicking on gizmo elements (handles, borders)
-      target.closest('[data-gizmo]')
+      target.closest('[data-gizmo]') ||
+      // Don't start marquee if clicking on a resize handle
+      target.closest('[data-resize-handle]') ||
+      // Don't start marquee if clicking on a track-push handle
+      target.closest('[data-track-push]') ||
+      target.style.cursor === 'col-resize' ||
+      target.style.cursor === 'ns-resize'
     ) {
       return;
     }
@@ -282,9 +291,12 @@ export function useMarqueeSelection({
     const container = containerRef.current;
     const rect = container.getBoundingClientRect();
 
-    // Account for scroll offset to get position in content space
-    const currentX = e.clientX - rect.left + container.scrollLeft;
-    const currentY = e.clientY - rect.top + container.scrollTop;
+    // Account for scroll offset to get position in content space,
+    // clamped to container bounds so the marquee never extends outside
+    const rawX = e.clientX - rect.left + container.scrollLeft;
+    const rawY = e.clientY - rect.top + container.scrollTop;
+    const currentX = Math.max(container.scrollLeft, Math.min(container.scrollLeft + container.clientWidth, rawX));
+    const currentY = Math.max(container.scrollTop, Math.min(container.scrollTop + container.clientHeight, rawY));
 
     // Check if we've moved past threshold
     if (!hasMovedRef.current) {

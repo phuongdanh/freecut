@@ -14,7 +14,7 @@ import { useKeyframesStore } from '../keyframes-store';
 import { useTimelineSettingsStore } from '../timeline-settings-store';
 import { useTransitionsStore } from '../transitions-store';
 import { buildTransitionIndexes } from '../../utils/transition-indexes';
-import { canAddKeyframeAtFrame, execute, logger } from './shared';
+import { canAddKeyframeAtFrame, execute, getLogger } from './shared';
 
 function getTransformKeys(transform: Partial<TransformProperties>): Set<string> {
   const keys = new Set<string>();
@@ -134,7 +134,7 @@ export function commitMaskEdit(
         }
 
         if (!canAddKeyframeAtFrame(autoOperation.itemId, autoOperation.frame)) {
-          logger.warn('Cannot add auto keyframe in transition region', {
+          getLogger().warn('Cannot add auto keyframe in transition region', {
             itemId: autoOperation.itemId,
             property: autoOperation.property,
             frame: autoOperation.frame,

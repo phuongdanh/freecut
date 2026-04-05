@@ -1,10 +1,11 @@
 import { useMemo, useCallback, useEffect, memo } from 'react';
-import { Move, Sparkles, Film } from 'lucide-react';
+import { Film, Sparkles, Volume2 } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Separator } from '@/components/ui/separator';
 import { useEditorStore } from '@/shared/state/editor';
 import { useSelectionStore } from '@/shared/state/selection';
-import { useTimelineStore } from '@/features/editor/deps/timeline-store';
+import { useItemsStore, useTimelineStore } from '@/features/editor/deps/timeline-store';
 import { useProjectStore } from '@/features/editor/deps/projects';
 import type { ClipInspectorTab } from '@/shared/state/editor';
 import type { SelectionState, SelectionActions } from '@/shared/state/selection';
@@ -12,7 +13,6 @@ import type { TimelineState, TimelineActions } from '@/features/editor/deps/time
 import type { TransformProperties } from '@/types/transform';
 import type { TimelineItem } from '@/types/timeline';
 
-import { SourceSection } from './source-section';
 import { LayoutSection } from './layout-section';
 import { FillSection } from './fill-section';
 import { VideoSection } from './video-section';
@@ -46,7 +46,6 @@ function computeItemTypeInfo(items: TimelineItem[]) {
     hasTextItems: types.has('text'),
     hasShapeItems: types.has('shape'),
     hasAdjustmentItems: types.has('adjustment'),
-    isOnlyAdjustmentItems: types.size === 1 && types.has('adjustment'),
     isOnlyTextOrShape: items.length > 0 && items.every(
       item => item.type === 'text' || item.type === 'shape'
     ),
@@ -55,7 +54,7 @@ function computeItemTypeInfo(items: TimelineItem[]) {
 
 /**
  * Clip properties panel - shown when one or more clips are selected.
- * Displays and allows editing of clip transforms and media properties.
+ * Displays and allows editing of clip visual, audio, and effect properties.
  * Memoized to prevent re-renders when props haven't changed.
  */
 export const ClipPanel = memo(function ClipPanel() {
@@ -63,35 +62,35 @@ export const ClipPanel = memo(function ClipPanel() {
   const clipInspectorTab = useEditorStore((s) => s.clipInspectorTab);
   const setClipInspectorTab = useEditorStore((s) => s.setClipInspectorTab);
   const selectedItemIds = useSelectionStore((s: SelectionState & SelectionActions) => s.selectedItemIds);
-  const fps = useTimelineStore((s: TimelineState & TimelineActions) => s.fps);
   const updateItemsTransform = useTimelineStore((s: TimelineState & TimelineActions) => s.updateItemsTransform);
-  const currentProject = useProjectStore((s) => s.currentProject);
+  const projectWidth = useProjectStore((s) => s.currentProject?.metadata.width ?? 1920);
+  const projectHeight = useProjectStore((s) => s.currentProject?.metadata.height ?? 1080);
+  const projectFps = useProjectStore((s) => s.currentProject?.metadata.fps ?? 30);
+  const selectedItems = useItemsStore(
+    useShallow(
+      useCallback((s) => {
+        const items: TimelineItem[] = [];
 
-  // Get all items from the timeline store, then derive selected items via useMemo.
-  // NOTE: Do NOT use useShallow(useCallback(..., [selectedItemIds])) as a combined
-  // selector here. React 19's useSyncExternalStore does not re-evaluate a changed
-  // selector function when the re-render was triggered by a different store
-  // (selection store), causing stale items to be returned. Wrapping cross-store
-  // deps like selectedItemIds in the selector reintroduces this stale-selector bug.
-  // Trade-off: subscribing to s.items means ClipPanel re-renders on any item
-  // mutation. useTimelineStore (the facade in timeline-store-facade.ts) only accepts
-  // a single selector — no custom equality comparator. If perf becomes a problem,
-  // consider subscribeWithSelector or restructuring to avoid deriving here.
-  const items = useTimelineStore((s: TimelineState & TimelineActions) => s.items);
-  const selectedItemIdSet = useMemo(() => new Set(selectedItemIds), [selectedItemIds]);
-  const selectedItems = useMemo(
-    () => items.filter((item: TimelineItem) => selectedItemIdSet.has(item.id)),
-    [items, selectedItemIdSet]
+        for (const itemId of selectedItemIds) {
+          const item = s.itemById[itemId];
+          if (item) {
+            items.push(item);
+          }
+        }
+
+        return items;
+      }, [selectedItemIds])
+    )
   );
 
   // Canvas settings
   const canvas = useMemo(
     () => ({
-      width: currentProject?.metadata.width ?? 1920,
-      height: currentProject?.metadata.height ?? 1080,
-      fps: currentProject?.metadata.fps ?? 30,
+      width: projectWidth,
+      height: projectHeight,
+      fps: projectFps,
     }),
-    [currentProject]
+    [projectFps, projectHeight, projectWidth]
   );
 
   // CONSOLIDATED: Single pass for all item type checks
@@ -109,7 +108,6 @@ export const ClipPanel = memo(function ClipPanel() {
     hasTextItems,
     hasShapeItems,
     hasAdjustmentItems,
-    isOnlyAdjustmentItems,
     isOnlyTextOrShape,
   } = itemTypeInfo;
 
@@ -156,20 +154,20 @@ export const ClipPanel = memo(function ClipPanel() {
     [updateItemsTransform]
   );
 
-  // Determine which tabs should be visible
-  const showTransformTab = hasVisualItems && !isOnlyAdjustmentItems;
+  // Determine which categories should be visible
+  const showVideoTab = layoutFillItems.length > 0;
+  const showAudioTab = hasAudioItems;
   const showEffectsTab = hasVisualItems;
-  const showMediaTab = hasTextItems || hasShapeItems || hasVideoItems || hasGifItems || hasAudioItems;
 
   const availableTabs = useMemo(() => {
     const tabs: ClipInspectorTab[] = [];
-    if (showTransformTab) tabs.push('transform');
+    if (showVideoTab) tabs.push('video');
+    if (showAudioTab) tabs.push('audio');
     if (showEffectsTab) tabs.push('effects');
-    if (showMediaTab) tabs.push('media');
     return tabs;
-  }, [showEffectsTab, showMediaTab, showTransformTab]);
+  }, [showAudioTab, showEffectsTab, showVideoTab]);
 
-  const fallbackTab = availableTabs[0] ?? 'transform';
+  const fallbackTab = availableTabs[0] ?? 'video';
   const activeTab = availableTabs.includes(clipInspectorTab) ? clipInspectorTab : fallbackTab;
 
   useEffect(() => {
@@ -189,21 +187,24 @@ export const ClipPanel = memo(function ClipPanel() {
 
   return (
     <div className="space-y-3">
-      {/* Source info - always shown at top */}
-      <SourceSection items={selectedItems} fps={fps} />
-
-      <Separator />
-
       {/* Tabbed sections */}
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
         <TabsList className="grid w-full grid-cols-3 h-8">
           <TabsTrigger
-            value="transform"
-            disabled={!showTransformTab}
+            value="video"
+            disabled={!showVideoTab}
             className="text-xs gap-1 px-2"
           >
-            <Move className="h-3 w-3" />
-            Transform
+            <Film className="h-3 w-3" />
+            Video
+          </TabsTrigger>
+          <TabsTrigger
+            value="audio"
+            disabled={!showAudioTab}
+            className="text-xs gap-1 px-2"
+          >
+            <Volume2 className="h-3 w-3" />
+            Audio
           </TabsTrigger>
           <TabsTrigger
             value="effects"
@@ -213,40 +214,52 @@ export const ClipPanel = memo(function ClipPanel() {
             <Sparkles className="h-3 w-3" />
             Effects
           </TabsTrigger>
-          <TabsTrigger
-            value="media"
-            disabled={!showMediaTab}
-            className="text-xs gap-1 px-2"
-          >
-            <Film className="h-3 w-3" />
-            Media
-          </TabsTrigger>
         </TabsList>
 
-        {/* Transform Tab - Layout & Fill */}
-        <TabsContent value="transform" className="space-y-4 mt-3">
-          {hasVisualItems && !isOnlyAdjustmentItems && (
-            <>
-              <LayoutSection
-                items={layoutFillItems}
-                canvas={canvas}
-                onTransformChange={handleTransformChange}
-                aspectLocked={aspectLocked}
-                onAspectLockToggle={handleAspectLockToggle}
-              />
-              <Separator />
-              <FillSection
-                items={layoutFillItems}
-                canvas={canvas}
-                onTransformChange={handleTransformChange}
-              />
-              <Separator />
-              <CornerPinSection items={layoutFillItems} />
-            </>
+        {/* Video Tab - visual layout, content, and clip-specific controls */}
+        <TabsContent value="video" className="mt-3">
+          {showVideoTab && (
+            <div className="divide-y divide-border [&>*]:py-4 [&>*:first-child]:pt-0 [&>*:last-child]:pb-0">
+              {showVideoTab && (
+                <LayoutSection
+                  items={layoutFillItems}
+                  canvas={canvas}
+                  onTransformChange={handleTransformChange}
+                  aspectLocked={aspectLocked}
+                  onAspectLockToggle={handleAspectLockToggle}
+                />
+              )}
+              {hasVideoItems && <VideoSection items={selectedItems} />}
+              {showVideoTab && (
+                <FillSection
+                  items={layoutFillItems}
+                  canvas={canvas}
+                  onTransformChange={handleTransformChange}
+                />
+              )}
+              {showVideoTab && (
+                <CornerPinSection items={layoutFillItems} />
+              )}
+              {hasTextItems && (
+                <TextSection
+                  items={selectedItems}
+                  canvas={canvas}
+                  showEffectSection={false}
+                  showAnimationSection={false}
+                />
+              )}
+              {hasShapeItems && <ShapeSection items={selectedItems} />}
+              {hasGifItems && <GifSection items={selectedItems} />}
+            </div>
           )}
         </TabsContent>
 
-        {/* Effects Tab - Effects & Keyframes */}
+        {/* Audio Tab - gain and fades */}
+        <TabsContent value="audio" className="space-y-4 mt-3">
+          {hasAudioItems && <AudioSection items={selectedItems} />}
+        </TabsContent>
+
+        {/* Effects Tab - clip effects plus text styling and animation */}
         <TabsContent value="effects" className="space-y-4 mt-3">
           {hasVisualItems && (
             <>
@@ -257,46 +270,16 @@ export const ClipPanel = memo(function ClipPanel() {
                 </div>
               )}
               <EffectsSection items={visualItems} />
+              {hasTextItems && <Separator />}
+              {hasTextItems && (
+                <TextSection
+                  items={selectedItems}
+                  canvas={canvas}
+                  showContentSection={false}
+                />
+              )}
             </>
           )}
-        </TabsContent>
-
-        {/* Media Tab - Type-specific sections */}
-        <TabsContent value="media" className="space-y-4 mt-3">
-          {/* Text - only for text items */}
-          {hasTextItems && (
-            <>
-              <TextSection items={selectedItems} canvas={canvas} />
-              {(hasShapeItems || hasVideoItems || hasGifItems || hasAudioItems) && <Separator />}
-            </>
-          )}
-
-          {/* Shape - only for shape items */}
-          {hasShapeItems && (
-            <>
-              <ShapeSection items={selectedItems} />
-              {(hasVideoItems || hasGifItems || hasAudioItems) && <Separator />}
-            </>
-          )}
-
-          {/* Video - only for video items */}
-          {hasVideoItems && (
-            <>
-              <VideoSection items={selectedItems} />
-              {(hasGifItems || hasAudioItems) && <Separator />}
-            </>
-          )}
-
-          {/* GIF - only for animated GIF items */}
-          {hasGifItems && (
-            <>
-              <GifSection items={selectedItems} />
-              {hasAudioItems && <Separator />}
-            </>
-          )}
-
-          {/* Audio - for video and audio items */}
-          {hasAudioItems && <AudioSection items={selectedItems} />}
         </TabsContent>
       </Tabs>
     </div>

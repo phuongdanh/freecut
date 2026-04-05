@@ -15,7 +15,13 @@
 import { useCallback, useEffect, memo, useRef, useState } from 'react';
 import { useMaskEditorStore } from '../stores/mask-editor-store';
 import { useGizmoStore } from '../stores/gizmo-store';
-import { useItemsStore, useTimelineStore, useTransitionsStore } from '@/features/preview/deps/timeline-store';
+import {
+  useItemsStore,
+  useKeyframesStore,
+  useTimelineStore,
+  useTimelineViewportStore,
+  useTransitionsStore,
+} from '@/features/preview/deps/timeline-store';
 import {
   screenToCanvas,
   getEffectiveScale,
@@ -298,8 +304,6 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
   const convertSelectedVertexRequestMode = useMaskEditorStore(
     (s) => s.convertSelectedVertexRequestMode
   );
-  const keyframes = useTimelineStore((s) => s.keyframes);
-
   // Actions
   const commitMaskEdit = useTimelineStore((s) => s.commitMaskEdit);
   const selectVertices = useMaskEditorStore((s) => s.selectVertices);
@@ -1284,6 +1288,7 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
       activeTrackId,
       proposedFrame: currentFrame,
       durationInFrames,
+      itemType: 'shape',
     });
 
     if (!placement) {
@@ -1293,7 +1298,7 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
 
     const placementTrackId = placement.trackId;
     const eligibleTracks = resolveEffectiveTrackStates(tracks).filter(
-      (track) => track.visible !== false && !track.locked && !track.isGroup
+      (track) => track.visible !== false && !track.locked && !track.muted && !track.isGroup
     );
     const activeTrack = activeTrackId
       ? eligibleTracks.find((track) => track.id === activeTrackId)
@@ -1359,6 +1364,7 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
     addItem(shapeItem);
     setActiveTrack(shapeItem.trackId);
     selectItems([shapeItem.id]);
+    useTimelineViewportStore.getState().requestScrollToFrame(shapeItem.from);
     stopEditing();
   }, [coordParams, cancelPenMode, stopEditing]);
 
@@ -1509,7 +1515,7 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
       baseTransform: Partial<TransformProperties>;
       autoKeyframeOperations: AutoKeyframeOperation[];
     } => {
-      const itemKeyframes = keyframes.find((entry) => entry.itemId === item.id);
+      const itemKeyframes = useKeyframesStore.getState().keyframesByItemId[item.id];
       const baseTransform: Partial<TransformProperties> = {};
       const autoKeyframeOperations: AutoKeyframeOperation[] = [];
       const relativeFrame = currentFrame - item.from;
@@ -1563,7 +1569,7 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
 
       return { baseTransform, autoKeyframeOperations };
     },
-    [keyframes]
+    []
   );
 
   // ============================================================
@@ -1573,8 +1579,7 @@ export const MaskEditorOverlay = memo(function MaskEditorOverlay({
   const commitVertices = useCallback(
     (vertices: MaskVertex[]) => {
       if (!editingItemId) return;
-      const items = useItemsStore.getState().items;
-      const item = items.find((i) => i.id === editingItemId);
+      const item = useItemsStore.getState().itemById[editingItemId];
       if (item?.type === 'shape' && item.shapeType === 'path') {
         const currentFrame = usePlaybackStore.getState().currentFrame;
         const fitted = fitShapePathToBounds(vertices, itemTransform, item.transform);

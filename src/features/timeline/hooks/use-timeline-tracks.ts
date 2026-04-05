@@ -1,6 +1,11 @@
 import { useCallback } from 'react';
 import type { TimelineTrack } from '@/types/timeline';
 import { useTimelineStore } from '../stores/timeline-store';
+import { getTrackKind } from '@/features/timeline/utils/classic-tracks';
+
+function clampTrackVolume(volume: number): number {
+  return Math.max(-60, Math.min(12, Math.round(volume * 10) / 10));
+}
 
 /**
  * Timeline tracks management hook
@@ -137,131 +142,71 @@ export function useTimelineTracks() {
 
   /**
    * Toggle track locked state.
-   * Group: propagates to all children.
-   * Child inside locked group: also unlocks the group.
    */
   const toggleTrackLock = useCallback(
     (id: string) => {
       const currentTracks = useTimelineStore.getState().tracks;
       const track = currentTracks.find((t) => t.id === id);
       if (!track) return;
-      const newLocked = !track.locked;
-
-      // Group → set group + all children
-      if (track.isGroup) {
-        setTracks(
-          currentTracks.map((t) => {
-            if (t.id === id || t.parentTrackId === id) return { ...t, locked: newLocked };
-            return t;
-          })
-        );
-        return;
-      }
-
-      // Child unlocking inside locked group → also unlock group
-      if (!newLocked && track.parentTrackId) {
-        const parent = currentTracks.find((t) => t.id === track.parentTrackId);
-        if (parent?.locked) {
-          setTracks(
-            currentTracks.map((t) => {
-              if (t.id === parent.id) return { ...t, locked: false };
-              if (t.id === id) return { ...t, locked: false };
-              return t;
-            })
-          );
-          return;
-        }
-      }
-
-      updateTrack(id, { locked: newLocked });
+      updateTrack(id, { locked: !track.locked });
     },
-    [updateTrack, setTracks]
+    [updateTrack]
   );
 
   /**
    * Toggle track visibility.
-   * Group: propagates to all children.
-   * Child showing inside hidden group: also shows the group.
    */
   const toggleTrackVisibility = useCallback(
     (id: string) => {
       const currentTracks = useTimelineStore.getState().tracks;
       const track = currentTracks.find((t) => t.id === id);
       if (!track) return;
-      const newVisible = track.visible === false ? true : false;
-
-      // Group → set group + all children
-      if (track.isGroup) {
-        setTracks(
-          currentTracks.map((t) => {
-            if (t.id === id || t.parentTrackId === id) return { ...t, visible: newVisible };
-            return t;
-          })
-        );
-        return;
-      }
-
-      // Child showing inside hidden group → also show group
-      if (newVisible && track.parentTrackId) {
-        const parent = currentTracks.find((t) => t.id === track.parentTrackId);
-        if (parent && !parent.visible) {
-          setTracks(
-            currentTracks.map((t) => {
-              if (t.id === parent.id) return { ...t, visible: true };
-              if (t.id === id) return { ...t, visible: true };
-              return t;
-            })
-          );
-          return;
-        }
-      }
-
-      updateTrack(id, { visible: newVisible });
+      updateTrack(id, { visible: track.visible === false ? true : false });
     },
-    [updateTrack, setTracks]
+    [updateTrack]
   );
 
   /**
    * Toggle track audio muted state.
-   * Group: propagates to all children.
-   * Child unmuting inside muted group: also unmutes the group.
    */
   const toggleTrackMute = useCallback(
     (id: string) => {
       const currentTracks = useTimelineStore.getState().tracks;
       const track = currentTracks.find((t) => t.id === id);
       if (!track) return;
-      const newMuted = !track.muted;
+      updateTrack(id, { muted: !track.muted });
+    },
+    [updateTrack]
+  );
 
-      // Group → set group + all children
-      if (track.isGroup) {
-        setTracks(
-          currentTracks.map((t) => {
-            if (t.id === id || t.parentTrackId === id) return { ...t, muted: newMuted };
-            return t;
-          })
-        );
+  /**
+   * Toggle the primary disabled state for a track.
+   * Video tracks use visibility, audio tracks use mute, and unknown tracks
+   * fall back to toggling both to keep the control deterministic.
+   */
+  const toggleTrackDisabled = useCallback(
+    (id: string) => {
+      const currentTracks = useTimelineStore.getState().tracks;
+      const track = currentTracks.find((t) => t.id === id);
+      if (!track) return;
+
+      const kind = getTrackKind(track);
+      if (kind === 'video') {
+        updateTrack(id, { visible: track.visible === false ? true : false });
+        return;
+      }
+      if (kind === 'audio') {
+        updateTrack(id, { muted: !track.muted });
         return;
       }
 
-      // Child unmuting inside muted group → also unmute group
-      if (!newMuted && track.parentTrackId) {
-        const parent = currentTracks.find((t) => t.id === track.parentTrackId);
-        if (parent?.muted) {
-          setTracks(
-            currentTracks.map((t) => {
-              if (t.id === parent.id) return { ...t, muted: false };
-              if (t.id === id) return { ...t, muted: false };
-              return t;
-            })
-          );
-          return;
-        }
-      }
-
-      updateTrack(id, { muted: newMuted });
+      const isDisabled = track.visible === false || track.muted;
+      updateTrack(id, {
+        visible: isDisabled,
+        muted: !isDisabled,
+      });
     },
-    [updateTrack, setTracks]
+    [updateTrack]
   );
 
   /**
@@ -273,25 +218,19 @@ export function useTimelineTracks() {
     (id: string) => {
       const currentTracks = useTimelineStore.getState().tracks;
       const targetTrack = currentTracks.find((t) => t.id === id);
-      const isCurrentlySolo = targetTrack?.solo;
+      if (!targetTrack) return;
 
-      // If track is currently solo, just unsolo it
-      // If track is not solo, solo it and unsolo all others
-      setTracks(
-        currentTracks.map((track) => ({
-          ...track,
-          solo: track.id === id ? !isCurrentlySolo : false,
-        }))
-      );
+      updateTrack(id, { solo: !targetTrack.solo });
     },
-    [setTracks]
+    [updateTrack]
   );
 
-  // Group actions (delegating to store actions via facade)
-  const createGroup = useTimelineStore((s) => s.createGroup);
-  const ungroupAction = useTimelineStore((s) => s.ungroup);
-  const toggleGroupCollapse = useTimelineStore((s) => s.toggleGroupCollapse);
-  const removeFromGroup = useTimelineStore((s) => s.removeFromGroup);
+  const setTrackVolume = useCallback(
+    (id: string, volume: number) => {
+      updateTrack(id, { volume: clampTrackVolume(volume) });
+    },
+    [updateTrack]
+  );
 
   return {
     tracks,
@@ -301,13 +240,11 @@ export function useTimelineTracks() {
     insertTrack,
     updateTrack,
     reorderTracks,
+    toggleTrackDisabled,
     toggleTrackLock,
     toggleTrackVisibility,
     toggleTrackMute,
     toggleTrackSolo,
-    createGroup,
-    ungroup: ungroupAction,
-    toggleGroupCollapse,
-    removeFromGroup,
+    setTrackVolume,
   };
 }

@@ -57,6 +57,7 @@ function normalizeTransition(transition: Transition): Transition {
   return {
     ...transition,
     durationInFrames: normalizeTransitionDuration(transition.durationInFrames),
+    timing: transition.timing ?? 'linear',
   };
 }
 
@@ -163,17 +164,17 @@ export const useTransitionsStore = create<TransitionsState & TransitionsActions>
 
       const id = crypto.randomUUID();
 
-      const newTransition: Transition = {
-        id,
-        leftClipId,
-        rightClipId,
-        trackId,
-        type,
-        durationInFrames: duration,
-        presentation,
-        timing: 'linear',
-        direction,
-      };
+        const newTransition: Transition = {
+          id,
+          leftClipId,
+          rightClipId,
+          trackId,
+          type,
+          durationInFrames: duration,
+          presentation,
+          timing: 'linear',
+          direction,
+        };
 
       set((state) => {
         const nextTransitions = [...state.transitions, newTransition];

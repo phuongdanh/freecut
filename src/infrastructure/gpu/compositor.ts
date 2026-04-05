@@ -6,6 +6,7 @@
 export {
   CompositorPipeline,
   DEFAULT_LAYER_PARAMS,
+  GpuTexturePool,
 } from '@/lib/gpu-compositor';
 
 export type { CompositeLayer } from '@/lib/gpu-compositor';

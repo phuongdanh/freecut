@@ -3,16 +3,24 @@ import { useVideoConfig } from '../hooks/use-player-compat';
 import type { TimelineItem } from '@/types/timeline';
 import { BLEND_MODE_CSS } from '@/types/blend-mode-css';
 import { hasCornerPin, computeCornerPinMatrix3d } from '../utils/corner-pin';
-import { useCornerPinStore, usePlaybackStore } from '@/features/composition-runtime/deps/stores';
+import { useCornerPinStore } from '@/features/composition-runtime/deps/stores';
 import { useItemVisualState } from './hooks/use-item-visual-state';
 import {
   renderSvgMaskPathsToDataUrl,
 } from '../utils/clip-mask-raster';
 import type { MaskInfo } from './item';
+import type { CropSettings } from '@/types/transform';
+import { ContainedMediaLayout } from './contained-media-layout';
 
 interface ItemVisualWrapperProps {
   item: TimelineItem;
   masks?: MaskInfo[];
+  mediaContent?: {
+    fitMode: 'contain';
+    sourceWidth?: number;
+    sourceHeight?: number;
+    crop?: CropSettings;
+  };
   children: React.ReactNode;
 }
 
@@ -32,17 +40,16 @@ interface ItemVisualWrapperProps {
 export const ItemVisualWrapper: React.FC<ItemVisualWrapperProps> = ({
   item,
   masks = [],
+  mediaContent,
   children,
 }) => {
   const { width: canvasWidth, height: canvasHeight } = useVideoConfig();
 
   // Get all visual state from consolidated hook
   const state = useItemVisualState(item, masks);
-  const isInteractivePreviewScrub = usePlaybackStore((s) => s.previewFrame !== null);
   const shouldRasterizeSvgMask = state.maskType === 'svg-mask'
     && !!state.svgMaskPaths
-    && state.maskFeather > 0
-    && !isInteractivePreviewScrub;
+    && state.maskFeather > 0;
 
   // Compute mask style based on mask type
   const rasterSvgMaskDataUrl = useMemo(() => {
@@ -168,50 +175,100 @@ export const ItemVisualWrapper: React.FC<ItemVisualWrapperProps> = ({
     );
   }, [rasterSvgMaskDataUrl, state.maskType, state.svgMaskId, state.svgMaskPaths, state.maskFeather, state.maskInvert, canvasWidth, canvasHeight]);
 
+  const blendModeCss = item.blendMode && item.blendMode !== 'normal'
+    ? BLEND_MODE_CSS[item.blendMode]
+    : undefined;
+
+  const maskContainerStyle = useMemo((): React.CSSProperties => {
+    return {
+      position: 'absolute',
+      left: 0,
+      top: 0,
+      width: '100%',
+      height: '100%',
+      ...maskStyle,
+      mixBlendMode: blendModeCss,
+    };
+  }, [maskStyle, blendModeCss]);
+
+  const effectiveMediaChildren = mediaContent?.fitMode === 'contain'
+    ? (
+      <ContainedMediaLayout
+        sourceWidth={mediaContent.sourceWidth ?? state.transform.width}
+        sourceHeight={mediaContent.sourceHeight ?? state.transform.height}
+        containerWidth={state.transform.width}
+        containerHeight={state.transform.height}
+        crop={state.propertiesPreview?.crop ?? mediaContent.crop}
+      >
+        {children}
+      </ContainedMediaLayout>
+    )
+    : children;
+
+  const innerContent = (
+    <>
+      {/* Corner Pin wrapper (only when active) */}
+      {/* When corner pin is active, will-change + backfaceVisibility force Chrome
+          to composite through the CSS pipeline instead of video hardware overlay,
+          which would otherwise ignore the matrix3d transform. */}
+      <div
+        style={cornerPinStyle ? {
+          width: '100%',
+          height: '100%',
+          ...cornerPinStyle,
+          willChange: 'transform',
+          backfaceVisibility: 'hidden' as const,
+          overflow: state.transform.cornerRadius > 0 ? 'hidden' : undefined,
+        } : {
+          width: '100%',
+          height: '100%',
+        }}
+      >
+        {/* Inner: Effects + Content */}
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            position: 'relative',
+            filter: state.cssFilter || undefined,
+          }}
+        >
+          {effectiveMediaChildren}
+        </div>
+      </div>
+    </>
+  );
+
+  // When there's no mask, skip the full-canvas mask container div entirely
+  if (state.maskType === null) {
+    return (
+      <div
+        style={{
+          ...state.transformStyle,
+          overflow: state.transform.cornerRadius > 0 && !cornerPinStyle ? 'hidden' : undefined,
+          mixBlendMode: blendModeCss,
+        }}
+      >
+        {innerContent}
+      </div>
+    );
+  }
+
   return (
     <>
       {/* SVG mask definitions (hidden, referenced via CSS) */}
       {svgMaskDefs}
 
-      {/* Outer: Transform + Mask + Blend Mode */}
-      <div
-        style={{
-          ...state.transformStyle,
-          ...maskStyle,
-          overflow: state.transform.cornerRadius > 0 && !cornerPinStyle ? 'hidden' : undefined,
-          mixBlendMode: item.blendMode && item.blendMode !== 'normal'
-            ? BLEND_MODE_CSS[item.blendMode]
-            : undefined,
-        }}
-      >
-        {/* Corner Pin wrapper (only when active) */}
-        {/* When corner pin is active, will-change + backfaceVisibility force Chrome
-            to composite through the CSS pipeline instead of video hardware overlay,
-            which would otherwise ignore the matrix3d transform. */}
+      {/* Masks are authored in composition space, so they must be applied on a
+          full-canvas wrapper instead of the item-sized transform node. */}
+      <div style={maskContainerStyle}>
         <div
-          style={cornerPinStyle ? {
-            width: '100%',
-            height: '100%',
-            ...cornerPinStyle,
-            willChange: 'transform',
-            backfaceVisibility: 'hidden' as const,
-            overflow: state.transform.cornerRadius > 0 ? 'hidden' : undefined,
-          } : {
-            width: '100%',
-            height: '100%',
+          style={{
+            ...state.transformStyle,
+            overflow: state.transform.cornerRadius > 0 && !cornerPinStyle ? 'hidden' : undefined,
           }}
         >
-          {/* Inner: Effects + Content */}
-          <div
-            style={{
-              width: '100%',
-              height: '100%',
-              position: 'relative',
-              filter: state.cssFilter || undefined,
-            }}
-          >
-            {children}
-          </div>
+          {innerContent}
         </div>
       </div>
     </>

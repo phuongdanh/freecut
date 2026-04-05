@@ -43,11 +43,18 @@ export default defineConfig({
             return 'core-logger';
           }
 
+          // Timeline bridge modules that re-export UI must live with the UI
+          // chunk; otherwise core ends up importing UI, which creates a
+          // feature-editing-core <-> feature-editing-ui TDZ cycle at startup.
+          if (
+            id.includes('/src/features/timeline/contracts/editor.ts')
+            || id.includes('/src/features/timeline/index.ts')
+          ) {
+            return 'feature-editing-ui';
+          }
+
           // Application feature chunks
           if (id.includes('/src/features/timeline/') || id.includes('/src/features/media-library/')) {
-            // Split UI from editing domain/runtime modules to reduce initial chunk pressure.
-            // Keep stores/services/utils/deps/contracts together to preserve execution order
-            // for tightly-coupled timeline/media-library integration points.
             if (id.includes('/components/')) {
               return 'feature-editing-ui';
             }
@@ -56,8 +63,12 @@ export default defineConfig({
           if (id.includes('/src/features/effects/')) {
             return 'feature-effects';
           }
+          // Composition-runtime shares deeply coupled deps with editing-core
+          // (timeline stores, keyframes, export utils). Merging them into one
+          // chunk eliminates the circular chunk dependency that causes TDZ
+          // errors ("Cannot access before initialization") in production builds.
           if (id.includes('/src/features/composition-runtime/')) {
-            return 'feature-composition-runtime';
+            return 'feature-editing-core';
           }
 
           // React must be in its own chunk, loaded first to ensure proper initialization

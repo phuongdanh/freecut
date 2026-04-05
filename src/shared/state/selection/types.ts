@@ -8,7 +8,7 @@ export interface SelectionState {
   selectedTrackIds: string[]; // Multi-track selection
   activeTrackId: string | null; // Single active track
   selectionType: 'item' | 'track' | 'marker' | 'transition' | null;
-  activeTool: 'select' | 'razor' | 'rate-stretch' | 'rolling-edit' | 'ripple-edit' | 'slip' | 'slide'; // Active timeline tool
+  activeTool: 'select' | 'trim-edit' | 'razor' | 'rate-stretch' | 'slip' | 'slide'; // Active timeline tool
   // Drag state for visual feedback
   dragState: {
     isDragging: boolean;
@@ -16,6 +16,7 @@ export interface SelectionState {
     draggedTrackIds?: string[]; // For track dragging
     offset: { x: number; y: number };
     activeSnapTarget?: { frame: number; type: 'grid' | 'item-start' | 'item-end' | 'playhead'; itemId?: string } | null;
+    activeLinkedDropTarget?: { trackId: string; zone: 'video' | 'audio'; createNew?: boolean } | null;
     isAltDrag?: boolean; // Whether Alt key is held (triggers duplication)
   } | null;
   // Keyframe lanes expansion state

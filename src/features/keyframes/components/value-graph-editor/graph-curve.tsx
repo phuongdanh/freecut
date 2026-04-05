@@ -64,7 +64,7 @@ const GraphCurve = memo(function GraphCurve({
           d={path}
           fill="none"
           stroke="#3b82f6"
-          strokeWidth={6}
+          strokeWidth={5}
           strokeLinecap="round"
           strokeLinejoin="round"
           strokeOpacity={0.3}
@@ -75,7 +75,7 @@ const GraphCurve = memo(function GraphCurve({
         d={path}
         fill="none"
         stroke={color}
-        strokeWidth={2.5}
+        strokeWidth={2}
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeOpacity={1}
@@ -90,9 +90,13 @@ const GraphCurve = memo(function GraphCurve({
 export const GraphCurves = memo(function GraphCurves({
   points,
   selectedKeyframeIds,
+  previewBezierConfigs,
+  strokeColor,
 }: {
   points: GraphKeyframePoint[];
   selectedKeyframeIds?: Set<string>;
+  previewBezierConfigs?: Record<string, { x1: number; y1: number; x2: number; y2: number }> | null;
+  strokeColor?: string;
 }) {
   // Sort points by frame (toSorted for immutability)
   const sortedPoints = useMemo(
@@ -117,8 +121,13 @@ export const GraphCurves = memo(function GraphCurves({
             key={`${startPoint.keyframe.id}-${endPoint.keyframe.id}`}
             startPoint={startPoint}
             endPoint={endPoint}
-            easingConfig={startPoint.keyframe.easingConfig || { type: startPoint.keyframe.easing }}
+            easingConfig={
+              previewBezierConfigs?.[startPoint.keyframe.id]
+                ? { type: 'cubic-bezier' as const, bezier: previewBezierConfigs[startPoint.keyframe.id] }
+                : (startPoint.keyframe.easingConfig || { type: startPoint.keyframe.easing })
+            }
             isSelected={isSelected}
+            strokeColor={strokeColor}
           />
         );
       })}
@@ -197,6 +206,8 @@ interface GraphPlayheadProps {
   onScrubEnd?: () => void;
   /** Whether scrubbing is disabled */
   disabled?: boolean;
+  /** Whether to render the visible playhead line/marker */
+  showVisuals?: boolean;
 }
 
 /**
@@ -213,18 +224,18 @@ export const GraphPlayhead = memo(function GraphPlayhead({
   onScrubStart,
   onScrubEnd,
   disabled = false,
+  showVisuals = true,
 }: GraphPlayheadProps) {
   const { startFrame, endFrame, width, height } = viewport;
-
-  // Check if playhead is in visible range
-  if (frame < startFrame || frame > endFrame) return null;
 
   const graphLeft = padding.left;
   const graphTop = padding.top;
   const graphWidth = width - padding.left - padding.right;
   const graphHeight = height - padding.top - padding.bottom;
 
-  const x = graphLeft + ((frame - startFrame) / (endFrame - startFrame)) * graphWidth;
+  // Clamp playhead to visible graph area so it's always visible at the edges
+  const rawX = graphLeft + ((frame - startFrame) / (endFrame - startFrame)) * graphWidth;
+  const x = Math.max(graphLeft, Math.min(graphLeft + graphWidth, rawX));
 
   // Convert screen X to frame (clamped to valid range)
   const screenXToFrame = (screenX: number): number => {
@@ -305,38 +316,39 @@ export const GraphPlayhead = memo(function GraphPlayhead({
           style={{ cursor: 'ew-resize' }}
         />
       )}
-      {/* Visible playhead line */}
-      <line
-        x1={x}
-        y1={graphTop}
-        x2={x}
-        y2={graphTop + graphHeight}
-        stroke="#ef4444"
-        strokeWidth={2}
-        strokeOpacity={0.9}
-        onPointerDown={isInteractive ? handlePointerDown : undefined}
-        style={{ cursor: isInteractive ? 'ew-resize' : 'default' }}
-      />
-      {/* Playhead top marker (draggable handle) */}
-      <path
-        d={`M ${x - 6} ${graphTop} L ${x + 6} ${graphTop} L ${x} ${graphTop + 8} Z`}
-        fill="#ef4444"
-        onPointerDown={isInteractive ? handlePointerDown : undefined}
-        style={{ cursor: isInteractive ? 'ew-resize' : 'default' }}
-      />
-      {/* Frame number label */}
-      <text
-        x={x}
-        y={graphTop - 4}
-        textAnchor="middle"
-        fill="#ef4444"
-        fontSize={9}
-        fontFamily="monospace"
-        fontWeight="bold"
-        style={{ pointerEvents: 'none' }}
-      >
-        {totalFrames ? `F${Math.round(frame)}/${totalFrames - 1}` : `F${Math.round(frame)}`}
-      </text>
+      {showVisuals && (
+        <>
+          <line
+            x1={x}
+            y1={graphTop}
+            x2={x}
+            y2={graphTop + graphHeight}
+            stroke="#ef4444"
+            strokeWidth={2}
+            strokeOpacity={0.9}
+            onPointerDown={isInteractive ? handlePointerDown : undefined}
+            style={{ cursor: isInteractive ? 'ew-resize' : 'default' }}
+          />
+          <path
+            d={`M ${x - 6} ${graphTop} L ${x + 6} ${graphTop} L ${x} ${graphTop + 8} Z`}
+            fill="#ef4444"
+            onPointerDown={isInteractive ? handlePointerDown : undefined}
+            style={{ cursor: isInteractive ? 'ew-resize' : 'default' }}
+          />
+          <text
+            x={x}
+            y={graphTop - 4}
+            textAnchor="middle"
+            fill="#ef4444"
+            fontSize={9}
+            fontFamily="monospace"
+            fontWeight="bold"
+            style={{ pointerEvents: 'none' }}
+          >
+            {totalFrames ? `F${Math.round(frame)}/${totalFrames - 1}` : `F${Math.round(frame)}`}
+          </text>
+        </>
+      )}
     </g>
   );
 });

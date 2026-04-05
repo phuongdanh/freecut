@@ -1,4 +1,4 @@
-﻿import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { Layers, Trash2, ChevronRight } from 'lucide-react';
 import {
   Collapsible,
@@ -22,15 +22,21 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { cn } from '@/shared/ui/cn';
+import { useEditorStore } from '@/shared/state/editor';
 import {
+  deleteCompoundClips,
+  getCompoundClipDeletionImpact,
+  renameCompoundClip,
   useCompositionsStore,
   useCompositionNavigationStore,
-  useItemsStore,
   type SubComposition,
+  wouldCreateCompositionCycle,
 } from '@/features/media-library/deps/timeline-stores';
-import { removeItemsFromItemsActions as removeItems } from '@/features/media-library/deps/timeline-actions';
 import { useMediaLibraryStore } from '../stores/media-library-store';
 import { setMediaDragData, clearMediaDragData } from '../utils/drag-data-cache';
+import { GRID_MIN_SIZE_PX, GRID_GAP_BY_SIZE } from './media-grid-constants';
+import { CARD_GRID_BASE, CARD_LIST_BASE, CARD_PERF_STYLE } from './card-styles';
+import { compoundClipThumbnailService } from '../services/compound-clip-thumbnail-service';
 
 /**
  * Compositions section in the media library.
@@ -39,19 +45,22 @@ import { setMediaDragData, clearMediaDragData } from '../utils/drag-data-cache';
  */
 export function CompositionsSection() {
   const compositions = useCompositionsStore((s) => s.compositions);
-  const removeComposition = useCompositionsStore((s) => s.removeComposition);
-  const updateComposition = useCompositionsStore((s) => s.updateComposition);
+  const compositionById = useCompositionsStore((s) => s.compositionById);
   const enterComposition = useCompositionNavigationStore((s) => s.enterComposition);
   const activeCompositionId = useCompositionNavigationStore((s) => s.activeCompositionId);
 
   const viewMode = useMediaLibraryStore((s) => s.viewMode);
+  const mediaItemSize = useMediaLibraryStore((s) => s.mediaItemSize);
+  const selectedMediaIds = useMediaLibraryStore((s) => s.selectedMediaIds);
+  const selectedCompositionIds = useMediaLibraryStore((s) => s.selectedCompositionIds);
+  const toggleCompositionSelection = useMediaLibraryStore((s) => s.toggleCompositionSelection);
+  const setSelection = useMediaLibraryStore((s) => s.setSelection);
   const [open, setOpen] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<SubComposition | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const renameCancelledRef = useRef(false);
-
-  if (compositions.length === 0) return null;
+  const lastSelectedCompositionIdRef = useRef<string | null>(null);
 
   const handleEnter = (comp: SubComposition) => {
     enterComposition(comp.id, comp.name);
@@ -61,16 +70,48 @@ export function CompositionsSection() {
     setDeleteTarget(comp);
   };
 
+  const handleCompositionSelect = useCallback(
+    (compositionId: string, event?: React.MouseEvent) => {
+      if (event?.shiftKey && lastSelectedCompositionIdRef.current) {
+        const lastIndex = compositions.findIndex((item) => item.id === lastSelectedCompositionIdRef.current);
+        const currentIndex = compositions.findIndex((item) => item.id === compositionId);
+
+        if (lastIndex !== -1 && currentIndex !== -1) {
+          const startIndex = Math.min(lastIndex, currentIndex);
+          const endIndex = Math.max(lastIndex, currentIndex);
+          const rangeIds = compositions.slice(startIndex, endIndex + 1).map((item) => item.id);
+
+          if (event.ctrlKey || event.metaKey) {
+            setSelection({
+              mediaIds: selectedMediaIds,
+              compositionIds: [...new Set([...selectedCompositionIds, ...rangeIds])],
+            });
+          } else {
+            setSelection({ mediaIds: [], compositionIds: rangeIds });
+          }
+          return;
+        }
+      }
+
+      if (event?.ctrlKey || event?.metaKey) {
+        toggleCompositionSelection(compositionId);
+        lastSelectedCompositionIdRef.current = compositionId;
+        return;
+      }
+
+      setSelection({ mediaIds: [], compositionIds: [compositionId] });
+      lastSelectedCompositionIdRef.current = compositionId;
+    },
+    [compositions, selectedCompositionIds, selectedMediaIds, setSelection, toggleCompositionSelection]
+  );
+
   const handleConfirmDelete = () => {
     if (!deleteTarget) return;
-    const items = useItemsStore.getState().items;
-    const refsOnTimeline = items.filter(
-      (i) => i.type === 'composition' && i.compositionId === deleteTarget.id
-    );
-    if (refsOnTimeline.length > 0) {
-      removeItems(refsOnTimeline.map((i) => i.id));
-    }
-    removeComposition(deleteTarget.id);
+    deleteCompoundClips([deleteTarget.id]);
+    setSelection({
+      mediaIds: selectedMediaIds,
+      compositionIds: selectedCompositionIds.filter((id) => id !== deleteTarget.id),
+    });
     setDeleteTarget(null);
   };
 
@@ -87,16 +128,16 @@ export function CompositionsSection() {
     }
     const trimmed = editValue.trim();
     if (trimmed && trimmed !== useCompositionsStore.getState().getComposition(id)?.name) {
-      updateComposition(id, { name: trimmed });
+      renameCompoundClip(id, trimmed);
     }
     setEditingId(null);
   };
 
-  const refsOnTimeline = deleteTarget
-    ? useItemsStore.getState().items.filter(
-        (i) => i.type === 'composition' && i.compositionId === deleteTarget.id
-      )
-    : [];
+  const deleteImpact = deleteTarget
+    ? getCompoundClipDeletionImpact([deleteTarget.id])
+    : { rootReferenceCount: 0, nestedReferenceCount: 0, totalReferenceCount: 0 };
+
+  if (compositions.length === 0) return null;
 
   return (
     <>
@@ -110,25 +151,34 @@ export function CompositionsSection() {
           />
           <Layers className="w-3 h-3 text-violet-400" />
           <span className="text-xs font-semibold tracking-wide uppercase text-muted-foreground">
-            Compositions
+            Compound Clips
           </span>
           <span className="text-[10px] tabular-nums text-muted-foreground/60">
             {compositions.length}
           </span>
         </CollapsibleTrigger>
-        <CollapsibleContent className={cn(
-          'pt-1 pb-2',
-          viewMode === 'grid' ? 'grid grid-cols-2 md:grid-cols-3 gap-4' : 'space-y-2'
-        )}>
+        <CollapsibleContent
+          className={cn(
+            'pt-1 pb-2',
+            viewMode === 'grid' ? `grid ${GRID_GAP_BY_SIZE[mediaItemSize] ?? GRID_GAP_BY_SIZE[3]}` : 'space-y-1'
+          )}
+          style={viewMode === 'grid' ? { gridTemplateColumns: `repeat(auto-fill, minmax(min(${GRID_MIN_SIZE_PX[mediaItemSize] ?? GRID_MIN_SIZE_PX[3]}px, 100%), 1fr))` } : undefined}
+        >
           {compositions.map((comp) => (
             <CompositionCard
               key={comp.id}
               composition={comp}
               viewMode={viewMode}
-              isInsideSubComp={activeCompositionId !== null}
+              selected={selectedCompositionIds.includes(comp.id)}
+              dragDisabled={wouldCreateCompositionCycle({
+                parentCompositionId: activeCompositionId,
+                insertedCompositionId: comp.id,
+                compositionById,
+              })}
               isEditing={editingId === comp.id}
               editValue={editValue}
               onEditValueChange={setEditValue}
+              onSelect={(event) => handleCompositionSelect(comp.id, event)}
               onEnter={handleEnter}
               onDelete={handleDeleteRequest}
               onStartRename={handleStartRename}
@@ -142,24 +192,23 @@ export function CompositionsSection() {
         </CollapsibleContent>
       </Collapsible>
 
-      {/* Delete confirmation dialog */}
       <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => !open && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete composition?</AlertDialogTitle>
+            <AlertDialogTitle>Delete compound clip?</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>
                   Are you sure you want to delete &ldquo;{deleteTarget?.name}&rdquo;?
                   This action cannot be undone.
                 </p>
-                {refsOnTimeline.length > 0 && (
+                {deleteImpact.totalReferenceCount > 0 && (
                   <div className="flex items-start gap-2 p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-md">
                     <Trash2 className="w-4 h-4 text-yellow-500 flex-shrink-0 mt-0.5" />
                     <div className="text-sm text-yellow-600 dark:text-yellow-400">
-                      <p className="font-medium">Timeline references will be removed</p>
+                      <p className="font-medium">All remaining instances will be removed</p>
                       <p className="text-xs mt-1 text-yellow-600/80 dark:text-yellow-400/80">
-                        {refsOnTimeline.length} composition item{refsOnTimeline.length > 1 ? 's' : ''} on the timeline will also be deleted.
+                        {deleteImpact.totalReferenceCount} compound clip instance{deleteImpact.totalReferenceCount > 1 ? 's' : ''} across the timeline and nested compound clips will also be deleted.
                       </p>
                     </div>
                   </div>
@@ -182,15 +231,15 @@ export function CompositionsSection() {
   );
 }
 
-// --- Composition card ---
-
 interface CompositionCardProps {
   composition: SubComposition;
   viewMode: 'grid' | 'list';
-  isInsideSubComp: boolean;
+  selected: boolean;
+  dragDisabled: boolean;
   isEditing: boolean;
   editValue: string;
   onEditValueChange: (value: string) => void;
+  onSelect: (event: React.MouseEvent) => void;
   onEnter: (comp: SubComposition) => void;
   onDelete: (comp: SubComposition) => void;
   onStartRename: (comp: SubComposition) => void;
@@ -201,10 +250,12 @@ interface CompositionCardProps {
 function CompositionCard({
   composition,
   viewMode,
-  isInsideSubComp,
+  selected,
+  dragDisabled,
   isEditing,
   editValue,
   onEditValueChange,
+  onSelect,
   onEnter,
   onDelete,
   onStartRename,
@@ -212,6 +263,14 @@ function CompositionCard({
   onCancelRename,
 }: CompositionCardProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const thumbnailContainerRef = useRef<HTMLDivElement | null>(null);
+  const [thumbnailUrl, setThumbnailUrl] = useState<string | null>(null);
+  const [skimProgress, setSkimProgress] = useState<number | null>(null);
+  const thisComposition = useCompositionsStore(
+    useCallback((s) => s.compositionById[composition.id], [composition.id])
+  );
+  const setCompoundClipSkimPreview = useEditorStore((s) => s.setCompoundClipSkimPreview);
+  const clearCompoundClipSkimPreview = useEditorStore((s) => s.clearCompoundClipSkimPreview);
 
   useEffect(() => {
     if (isEditing && inputRef.current) {
@@ -220,9 +279,29 @@ function CompositionCard({
     }
   }, [isEditing]);
 
+  useEffect(() => {
+    let mounted = true;
+
+    const loadThumbnail = async () => {
+      const url = await compoundClipThumbnailService.getThumbnailBlobUrl(composition.id);
+      if (mounted) {
+        setThumbnailUrl(url);
+      }
+    };
+
+    void loadThumbnail();
+
+    return () => {
+      mounted = false;
+      if (useEditorStore.getState().compoundClipSkimPreviewCompositionId === composition.id) {
+        clearCompoundClipSkimPreview();
+      }
+    };
+  }, [clearCompoundClipSkimPreview, composition.id, thisComposition]);
+
   const handleDragStart = useCallback(
     (e: React.DragEvent) => {
-      if (isInsideSubComp) {
+      if (dragDisabled) {
         e.preventDefault();
         return;
       }
@@ -238,7 +317,7 @@ function CompositionCard({
       e.dataTransfer.effectAllowed = 'copy';
       setMediaDragData(data);
     },
-    [composition, isInsideSubComp]
+    [composition, dragDisabled]
   );
 
   const handleDragEnd = useCallback(() => {
@@ -260,6 +339,49 @@ function CompositionCard({
     [composition.id, onCommitRename, onCancelRename]
   );
 
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => {
+      if (isEditing) return;
+      onSelect(e);
+    },
+    [isEditing, onSelect]
+  );
+
+  const canHoverPreview = composition.durationInFrames > 0;
+
+  const updateSkimPreview = useCallback((clientX: number) => {
+    const thumbnailContainer = thumbnailContainerRef.current;
+    if (!thumbnailContainer || !canHoverPreview) return;
+
+    const rect = thumbnailContainer.getBoundingClientRect();
+    if (rect.width <= 0) return;
+
+    const progress = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const frame = Math.min(
+      composition.durationInFrames - 1,
+      Math.max(0, Math.round(progress * Math.max(0, composition.durationInFrames - 1))),
+    );
+
+    setSkimProgress(progress);
+    setCompoundClipSkimPreview(composition.id, frame);
+  }, [canHoverPreview, composition.durationInFrames, composition.id, setCompoundClipSkimPreview]);
+
+  const handleThumbnailPointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!canHoverPreview || event.pointerType === 'touch') return;
+    updateSkimPreview(event.clientX);
+  }, [canHoverPreview, updateSkimPreview]);
+
+  const handleThumbnailPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!canHoverPreview || event.pointerType === 'touch') return;
+    updateSkimPreview(event.clientX);
+  }, [canHoverPreview, updateSkimPreview]);
+
+  const handleThumbnailPointerLeave = useCallback(() => {
+    if (!canHoverPreview) return;
+    setSkimProgress(null);
+    clearCompoundClipSkimPreview();
+  }, [canHoverPreview, clearCompoundClipSkimPreview]);
+
   const itemCount = composition.items.length;
   const fps = composition.fps || 30;
   const durationSecs = composition.durationInFrames / fps;
@@ -273,22 +395,42 @@ function CompositionCard({
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div
-            draggable={!isInsideSubComp && !isEditing}
+            data-composition-id={composition.id}
+            draggable={!dragDisabled && !isEditing}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
+            onClick={handleClick}
             onDoubleClick={handleDoubleClick}
+            style={CARD_PERF_STYLE}
             className={cn(
-              'group relative panel-bg border-2 rounded-lg overflow-hidden transition-all duration-300 aspect-square flex flex-col hover:scale-[1.02]',
-              isInsideSubComp
+              CARD_GRID_BASE,
+              dragDisabled
                 ? 'opacity-50 cursor-not-allowed border-border'
-                : 'cursor-grab border-border hover:border-violet-500/50 hover:shadow-lg hover:shadow-violet-500/10'
+                : cn(
+                    'cursor-grab',
+                    selected
+                      ? 'border-violet-500 ring-2 ring-violet-500/20 shadow-lg shadow-violet-500/10'
+                      : 'border-border hover:border-violet-500/50 hover:shadow-lg hover:shadow-violet-500/10'
+                  )
             )}
           >
-            {/* Thumbnail area â€” gradient with centered icon */}
-            <div className="flex-1 bg-secondary relative overflow-hidden min-h-0 flex items-center justify-center bg-gradient-to-br from-violet-600/20 to-violet-900/30">
-              <Layers className="w-8 h-8 text-violet-400/70" />
+            <div
+              ref={thumbnailContainerRef}
+              className="flex-1 bg-secondary relative overflow-hidden min-h-0 flex items-center justify-center bg-gradient-to-br from-violet-600/20 to-violet-900/30"
+              onPointerEnter={handleThumbnailPointerEnter}
+              onPointerMove={handleThumbnailPointerMove}
+              onPointerLeave={handleThumbnailPointerLeave}
+            >
+              {thumbnailUrl ? (
+                <img
+                  src={thumbnailUrl}
+                  alt={composition.name}
+                  className="w-full h-full object-contain transition-transform duration-500 group-hover:scale-105"
+                />
+              ) : (
+                <Layers className="w-8 h-8 text-violet-400/70" />
+              )}
 
-              {/* Bottom overlay badges */}
               <div className="absolute inset-x-0 bottom-0 px-1.5 py-1 bg-gradient-to-t from-black/60 to-transparent flex items-center justify-between gap-1 pointer-events-none">
                 <div className="p-0.5 rounded bg-violet-600/90 text-white">
                   <Layers className="w-2.5 h-2.5" />
@@ -297,9 +439,14 @@ function CompositionCard({
                   {durationLabel}
                 </div>
               </div>
+              {skimProgress !== null && (
+                <div
+                  className="absolute inset-y-0 w-px bg-white/85 shadow-[0_0_0_1px_rgba(0,0,0,0.3)] pointer-events-none"
+                  style={{ left: `${skimProgress * 100}%` }}
+                />
+              )}
             </div>
 
-            {/* Footer */}
             <div className="px-1.5 py-1 bg-panel-bg/50 flex-shrink-0">
               <div className="flex items-center justify-between gap-1">
                 <div className="flex-1 min-w-0">
@@ -321,7 +468,6 @@ function CompositionCard({
               </div>
             </div>
 
-            {/* Film strip edge detail */}
             <div className="absolute left-0 top-0 bottom-0 w-[2px] bg-gradient-to-b from-border via-muted to-border opacity-50" />
             <div className="absolute right-0 top-0 bottom-0 w-[2px] bg-gradient-to-b from-border via-muted to-border opacity-50" />
           </div>
@@ -329,7 +475,7 @@ function CompositionCard({
 
         <ContextMenuContent>
           <ContextMenuItem onClick={() => onEnter(composition)}>
-            Enter Composition
+            Enter Compound Clip
           </ContextMenuItem>
           <ContextMenuItem onClick={() => onStartRename(composition)}>
             Rename
@@ -345,28 +491,53 @@ function CompositionCard({
     );
   }
 
-  // List view (default) â€” matches MediaCard list layout
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div
-          draggable={!isInsideSubComp && !isEditing}
+          <div
+            data-composition-id={composition.id}
+          draggable={!dragDisabled && !isEditing}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
+          onClick={handleClick}
           onDoubleClick={handleDoubleClick}
+          style={CARD_PERF_STYLE}
           className={cn(
-            'group panel-bg border rounded overflow-hidden transition-all duration-200 flex items-center gap-3 p-2',
-            isInsideSubComp
+            CARD_LIST_BASE,
+            dragDisabled
               ? 'opacity-50 cursor-not-allowed border-border'
-              : 'cursor-grab border-border hover:border-violet-500/50'
+              : cn(
+                  'cursor-grab',
+                  selected
+                    ? 'border-violet-500 ring-1 ring-violet-500/20'
+                    : 'border-border hover:border-violet-500/50'
+                )
           )}
         >
-          {/* Thumbnail */}
-          <div className="w-16 h-12 bg-secondary rounded overflow-hidden flex-shrink-0 flex items-center justify-center bg-gradient-to-br from-violet-600/20 to-violet-900/30">
-            <Layers className="w-5 h-5 text-violet-400" />
+          <div
+            ref={thumbnailContainerRef}
+            className="w-16 h-12 bg-secondary rounded overflow-hidden flex-shrink-0 flex items-center justify-center bg-gradient-to-br from-violet-600/20 to-violet-900/30 relative"
+            onPointerEnter={handleThumbnailPointerEnter}
+            onPointerMove={handleThumbnailPointerMove}
+            onPointerLeave={handleThumbnailPointerLeave}
+          >
+            {thumbnailUrl ? (
+              <img
+                src={thumbnailUrl}
+                alt={composition.name}
+                className="w-full h-full object-contain"
+              />
+            ) : (
+              <Layers className="w-5 h-5 text-violet-400" />
+            )}
+            {skimProgress !== null && (
+              <div
+                className="absolute inset-y-0 w-px bg-white/85 shadow-[0_0_0_1px_rgba(0,0,0,0.3)] pointer-events-none"
+                style={{ left: `${skimProgress * 100}%` }}
+              />
+            )}
           </div>
 
-          {/* Info */}
           <div className="flex-1 min-w-0">
             {isEditing ? (
               <input
@@ -383,7 +554,6 @@ function CompositionCard({
               </h3>
             )}
             <div className="flex items-center gap-2 mt-0.5">
-              {/* Type badge */}
               <div className="p-0.5 rounded bg-violet-600/90 text-white flex-shrink-0">
                 <Layers className="w-2.5 h-2.5" />
               </div>
@@ -397,7 +567,7 @@ function CompositionCard({
 
       <ContextMenuContent>
         <ContextMenuItem onClick={() => onEnter(composition)}>
-          Enter Composition
+          Enter Compound Clip
         </ContextMenuItem>
         <ContextMenuItem onClick={() => onStartRename(composition)}>
           Rename
@@ -412,4 +582,3 @@ function CompositionCard({
     </ContextMenu>
   );
 }
-

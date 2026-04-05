@@ -1,8 +1,11 @@
-import { Activity, memo, useCallback, useRef, useEffect } from 'react';
+import { Activity, memo, useCallback, useEffect, useMemo, useRef } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { Button } from '@/components/ui/button';
-import { ChevronLeft, ChevronRight, Settings2 } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Settings2 } from 'lucide-react';
+import { useItemsStore } from '@/features/editor/deps/timeline-store';
 import { useEditorStore } from '@/shared/state/editor';
 import { useSelectionStore } from '@/shared/state/selection';
+import type { TimelineItem } from '@/types/timeline';
 import { CanvasPanel } from './canvas-panel';
 import { ClipPanel } from './clip-panel';
 import { MarkerPanel } from './marker-panel';
@@ -10,9 +13,67 @@ import { TransitionPanel } from './transition-panel';
 import { useSettingsStore } from '@/features/editor/deps/settings';
 import {
   EDITOR_LAYOUT_CSS_VALUES,
-  clampEditorSidebarWidth,
+  clampRightEditorSidebarWidth,
   getEditorLayout,
 } from '@/shared/ui/editor-layout';
+
+type HeaderItem = Pick<TimelineItem, 'id' | 'label' | 'linkedGroupId' | 'type'>;
+
+function buildClipHeaderGroups(items: HeaderItem[]) {
+  const groups = new Map<string, { displayLabel: string | null; labels: string[]; audioOnly: boolean }>();
+
+  for (const item of items) {
+    const key = item.linkedGroupId ?? item.id;
+    const label = item.label.trim() || null;
+    const existing = groups.get(key);
+
+    if (!existing) {
+      groups.set(key, {
+        displayLabel: label,
+        labels: label ? [label] : [],
+        audioOnly: item.type === 'audio',
+      });
+      continue;
+    }
+
+    if (label) {
+      existing.labels.push(label);
+      if (!existing.displayLabel || (existing.audioOnly && item.type !== 'audio')) {
+        existing.displayLabel = label;
+      }
+    }
+
+    if (item.type !== 'audio') {
+      existing.audioOnly = false;
+    }
+  }
+
+  return Array.from(groups.values(), (group) => ({
+    displayLabel: group.displayLabel,
+    title: group.labels.filter((label, index, labels) => labels.indexOf(label) === index).join(', '),
+  }));
+}
+
+function getClipHeader(items: HeaderItem[]) {
+  const groups = buildClipHeaderGroups(items);
+  const logicalCount = groups.length;
+
+  if (logicalCount === 0) return null;
+
+  if (logicalCount === 1 && groups[0]?.displayLabel) {
+    return {
+      text: groups[0].displayLabel,
+      title: groups[0].title || groups[0].displayLabel,
+    };
+  }
+
+  const fallbackLabel = `${logicalCount} clip${logicalCount === 1 ? '' : 's'} selected`;
+
+  return {
+    text: fallbackLabel,
+    title: groups.map((group) => group.title || group.displayLabel).filter(Boolean).join(', ') || fallbackLabel,
+  };
+}
 
 /**
  * Properties sidebar - right panel for editing properties.
@@ -27,11 +88,34 @@ export const PropertiesSidebar = memo(function PropertiesSidebar() {
   const toggleRightSidebar = useEditorStore((s) => s.toggleRightSidebar);
   const rightSidebarWidth = useEditorStore((s) => s.rightSidebarWidth);
   const setRightSidebarWidth = useEditorStore((s) => s.setRightSidebarWidth);
+  const propertiesFullColumn = useEditorStore((s) => s.propertiesFullColumn);
+  const togglePropertiesFullColumn = useEditorStore((s) => s.togglePropertiesFullColumn);
   const selectedItemIds = useSelectionStore((s) => s.selectedItemIds);
   const selectedMarkerId = useSelectionStore((s) => s.selectedMarkerId);
   const selectedTransitionId = useSelectionStore((s) => s.selectedTransitionId);
+  const selectedItems = useItemsStore(
+    useShallow(
+      useCallback((s) => {
+        const items: HeaderItem[] = [];
+
+        for (const itemId of selectedItemIds) {
+          const item = s.itemById[itemId];
+          if (item) {
+            items.push(item);
+          }
+        }
+
+        return items;
+      }, [selectedItemIds])
+    )
+  );
 
   const hasClipSelection = selectedItemIds.length > 0;
+  const clipHeader = useMemo(
+    () => getClipHeader(selectedItems),
+    [selectedItems]
+  );
+  const activeClipHeader = !selectedTransitionId && !selectedMarkerId ? clipHeader : null;
 
   // Resize handle logic
   const isResizingRef = useRef(false);
@@ -52,7 +136,7 @@ export const PropertiesSidebar = memo(function PropertiesSidebar() {
       if (!isResizingRef.current) return;
       // Dragging left increases width for right sidebar
       const delta = startXRef.current - e.clientX;
-      const newWidth = clampEditorSidebarWidth(startWidthRef.current + delta, editorLayout);
+      const newWidth = clampRightEditorSidebarWidth(startWidthRef.current + delta, editorLayout);
       setRightSidebarWidth(newWidth);
     };
 
@@ -91,14 +175,39 @@ export const PropertiesSidebar = memo(function PropertiesSidebar() {
               className="flex items-center justify-between px-3 border-b border-border flex-shrink-0"
               style={{ height: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderHeight }}
             >
-              <h2 className="text-xs font-semibold tracking-wide uppercase text-muted-foreground flex items-center gap-2">
-                <Settings2 className="w-3 h-3" />
-                Properties
-              </h2>
+              <div className="min-w-0 flex items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="shrink-0"
+                  style={{ width: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize, height: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize }}
+                  onClick={togglePropertiesFullColumn}
+                  data-tooltip={propertiesFullColumn ? 'Dock to preview' : 'Expand full column'}
+                  data-tooltip-side="bottom"
+                >
+                  {propertiesFullColumn ? (
+                    <ChevronUp className="w-3 h-3" />
+                  ) : (
+                    <ChevronDown className="w-3 h-3" />
+                  )}
+                </Button>
+                <Settings2 className="w-3 h-3 shrink-0 text-muted-foreground" />
+                <h2 className="min-w-0 flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
+                  <span className="shrink-0 uppercase tracking-wide">Properties</span>
+                  {activeClipHeader && (
+                    <>
+                      <span className="shrink-0">-</span>
+                      <span className="truncate normal-case tracking-normal" title={activeClipHeader.title}>
+                        {activeClipHeader.text}
+                      </span>
+                    </>
+                  )}
+                </h2>
+              </div>
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-6 w-6"
+                style={{ width: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize, height: EDITOR_LAYOUT_CSS_VALUES.sidebarHeaderButtonSize }}
                 onClick={toggleRightSidebar}
               >
                 <ChevronRight className="w-3.5 h-3.5" />

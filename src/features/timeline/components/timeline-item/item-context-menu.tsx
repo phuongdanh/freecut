@@ -71,6 +71,8 @@ interface CaptionGenerationOptions {
   /** Sent to translate API only when translating and a prompt is selected. */
   translationPrompt?: string;
 }
+import { formatHotkeyBinding } from '@/config/hotkeys';
+import { useResolvedHotkeys } from '@/features/timeline/deps/settings';
 
 interface ItemContextMenuProps {
   children: ReactNode;
@@ -83,9 +85,13 @@ interface ItemContextMenuProps {
   closerEdge: 'left' | 'right' | null;
   /** Keyframed properties for the item (used to build clear submenu) */
   keyframedProperties?: PropertyKeyframes[];
+  canLinkSelected?: boolean;
+  canUnlinkSelected?: boolean;
   onJoinSelected: () => void;
   onJoinLeft: () => void;
   onJoinRight: () => void;
+  onLinkSelected?: () => void;
+  onUnlinkSelected?: () => void;
   onRippleDelete: () => void;
   onDelete: () => void;
   onClearAllKeyframes?: () => void;
@@ -110,6 +116,13 @@ interface ItemContextMenuProps {
   /** Whether multiple items are selected (enables pre-comp creation) */
   canCreatePreComp?: boolean;
   onCreatePreComp?: () => void;
+  /** Whether this item is a text item (enables generate audio option) */
+  isTextItem?: boolean;
+  onGenerateAudioFromText?: () => void;
+  /** Whether scene detection is available for this item */
+  canDetectScenes?: boolean;
+  isDetectingScenes?: boolean;
+  onDetectScenes?: () => void;
 }
 
 /**
@@ -125,9 +138,13 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   hasJoinableRight,
   closerEdge,
   keyframedProperties,
+  canLinkSelected,
+  canUnlinkSelected,
   onJoinSelected,
   onJoinLeft,
   onJoinRight,
+  onLinkSelected,
+  onUnlinkSelected,
   onRippleDelete,
   onDelete,
   onClearAllKeyframes,
@@ -148,6 +165,9 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   onDissolveComposition,
   canCreatePreComp,
   onCreatePreComp,
+  isTextItem,
+  onGenerateAudioFromText,
+  // canDetectScenes, isDetectingScenes, onDetectScenes — disabled pending optical flow tuning
 }: ItemContextMenuProps) {
   const [captionDialogOpen, setCaptionDialogOpen] = useState(false);
   const [captionAction, setCaptionAction] = useState<'generate' | 'regenerate'>('generate');
@@ -161,6 +181,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
   const [newCaptionPromptFormKey, setNewCaptionPromptFormKey] = useState(0);
   const [newCaptionPromptError, setNewCaptionPromptError] = useState<string | null>(null);
   const [creatingCaptionPrompt, setCreatingCaptionPrompt] = useState(false);
+  const hotkeys = useResolvedHotkeys();
   const selectedCount = useSelectionStore((s) => s.selectedItemIds.length);
 
   const isCaptionTranslating = useMemo(
@@ -313,6 +334,24 @@ export const ItemContextMenu = memo(function ItemContextMenu({
           );
         })()}
 
+        {(canLinkSelected || canUnlinkSelected) && (
+          <>
+            {canLinkSelected && onLinkSelected && (
+              <ContextMenuItem onClick={onLinkSelected}>
+                Link Clips
+                <ContextMenuShortcut>{formatHotkeyBinding(hotkeys.LINK_AUDIO_VIDEO)}</ContextMenuShortcut>
+              </ContextMenuItem>
+            )}
+            {canUnlinkSelected && onUnlinkSelected && (
+              <ContextMenuItem onClick={onUnlinkSelected}>
+                Unlink Clips
+                <ContextMenuShortcut>{formatHotkeyBinding(hotkeys.UNLINK_AUDIO_VIDEO)}</ContextMenuShortcut>
+              </ContextMenuItem>
+            )}
+            <ContextMenuSeparator />
+          </>
+        )}
+
         {/* Clear Keyframes submenu - only show if item has keyframes */}
         {hasKeyframes && (
           <>
@@ -321,7 +360,7 @@ export const ItemContextMenu = memo(function ItemContextMenu({
               <ContextMenuSubContent className="w-48">
                 <ContextMenuItem onClick={onClearAllKeyframes}>
                   Clear All
-                  <ContextMenuShortcut>Shift+K</ContextMenuShortcut>
+                  <ContextMenuShortcut>{formatHotkeyBinding(hotkeys.CLEAR_KEYFRAMES)}</ContextMenuShortcut>
                 </ContextMenuItem>
                 <ContextMenuSeparator />
                 {propertiesWithKeyframes.map(({ property }) => (
@@ -354,6 +393,32 @@ export const ItemContextMenu = memo(function ItemContextMenu({
             <ContextMenuItem onClick={onFreezeFrame}>
               Insert Freeze Frame
               <ContextMenuShortcut>Shift+F</ContextMenuShortcut>
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+          </>
+        )}
+
+        {/* Detect Scenes - disabled pending optical flow tuning */}
+        {/* {canDetectScenes && onDetectScenes && (
+          <>
+            {isDetectingScenes ? (
+              <ContextMenuItem disabled>
+                Detecting Scenes...
+              </ContextMenuItem>
+            ) : (
+              <ContextMenuItem onClick={onDetectScenes}>
+                Detect Scenes &amp; Split
+              </ContextMenuItem>
+            )}
+            <ContextMenuSeparator />
+          </>
+        )} */}
+
+        {/* Generate Audio from Text - only show for text items */}
+        {isTextItem && onGenerateAudioFromText && (
+          <>
+            <ContextMenuItem onClick={onGenerateAudioFromText}>
+              Generate Audio from Text
             </ContextMenuItem>
             <ContextMenuSeparator />
           </>
@@ -421,17 +486,17 @@ export const ItemContextMenu = memo(function ItemContextMenu({
         {/* Composition operations */}
         {isCompositionItem && onEnterComposition && (
           <ContextMenuItem onClick={onEnterComposition}>
-            Enter Composition
+            Open Compound Clip
           </ContextMenuItem>
         )}
         {isCompositionItem && onDissolveComposition && (
           <ContextMenuItem onClick={onDissolveComposition}>
-            Dissolve Pre-Comp
+            Dissolve Compound Clip
           </ContextMenuItem>
         )}
         {canCreatePreComp && onCreatePreComp && (
           <ContextMenuItem onClick={onCreatePreComp}>
-            Create Pre-Composition
+            Create Compound Clip
           </ContextMenuItem>
         )}
         {((isCompositionItem && (onEnterComposition || onDissolveComposition)) || (canCreatePreComp && onCreatePreComp)) && (

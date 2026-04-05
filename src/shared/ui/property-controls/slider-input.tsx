@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { memo, useState, useCallback, useRef, useEffect } from 'react';
 import { cn } from '@/shared/ui/cn';
 
 type MixedValue = number | 'mixed';
@@ -16,6 +16,8 @@ interface SliderInputProps {
   onChange: (value: number) => void;
   /** Called during drag for live preview. If not provided, onChange is used. */
   onLiveChange?: (value: number) => void;
+  /** Optional throttle for live preview updates during drag. Set to 0 for every pointer move. */
+  liveChangeThrottleMs?: number;
   label?: string;
   min: number;
   max: number;
@@ -102,10 +104,11 @@ function animateSpring(
  * - Click value or double-click track to type exact value
  * - Hash marks at decile intervals
  */
-export function SliderInput({
+export const SliderInput = memo(function SliderInput({
   value,
   onChange,
   onLiveChange,
+  liveChangeThrottleMs = LIVE_CHANGE_THROTTLE_MS,
   label,
   min,
   max,
@@ -122,6 +125,8 @@ export function SliderInput({
 
   // Refs
   const trackRef = useRef<HTMLDivElement>(null);
+  const fillRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<HTMLDivElement>(null);
   const labelRef = useRef<HTMLSpanElement>(null);
   const valueSpanRef = useRef<HTMLSpanElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -148,13 +153,19 @@ export function SliderInput({
 
   const showInputRef = useRef(false);
   const isSubmittingRef = useRef(false);
+  const cancelEditRef = useRef(false);
+  const fillPercentRef = useRef(fillPercent);
+  const rubberStretchRef = useRef(rubberStretch);
+  const localValueRef = useRef<number | null>(localValue);
 
   const displayNumericValue = localValue ?? numericValue;
 
   // Sync fill from props when not interacting and no spring is running
   useEffect(() => {
     if (!isInteracting && !cancelSpringRef.current) {
-      setFillPercent(((numericValue - min) / (max - min)) * 100);
+      const nextFillPercent = ((numericValue - min) / (max - min)) * 100;
+      fillPercentRef.current = nextFillPercent;
+      setFillPercent(nextFillPercent);
     }
   }, [numericValue, min, max, isInteracting]);
 
@@ -183,6 +194,77 @@ export function SliderInput({
   const displayValue =
     isMixed && localValue === null ? 'Mixed' : formatDisplay(displayNumericValue);
 
+  const updateDisplayedValue = useCallback((nextLocalValue: number | null) => {
+    localValueRef.current = nextLocalValue;
+    if (showInputRef.current || !valueSpanRef.current) return;
+
+    valueSpanRef.current.textContent = isMixed && nextLocalValue === null
+      ? 'Mixed'
+      : formatDisplay(nextLocalValue ?? numericValue);
+  }, [formatDisplay, isMixed, numericValue]);
+
+  const updateStretchVisual = useCallback((nextStretch: number) => {
+    rubberStretchRef.current = nextStretch;
+    if (!trackRef.current) return;
+
+    const stretchWidth = Math.abs(nextStretch);
+    const stretchX = nextStretch < 0 ? nextStretch : 0;
+    trackRef.current.style.width = stretchWidth > 0 ? `calc(100% + ${stretchWidth}px)` : '';
+    trackRef.current.style.transform = stretchX !== 0 ? `translateX(${stretchX}px)` : '';
+  }, []);
+
+  const updateFillVisual = useCallback((nextFillPercent: number, options?: {
+    active?: boolean;
+    dragging?: boolean;
+  }) => {
+    fillPercentRef.current = nextFillPercent;
+    const clampedFillPercent = Math.max(0, Math.min(100, nextFillPercent));
+
+    if (fillRef.current) {
+      fillRef.current.style.width = `${clampedFillPercent}%`;
+    }
+
+    if (!handleRef.current) return;
+
+    const trackWidth = trackRef.current?.offsetWidth ?? 200;
+    const labelWidth = labelRef.current?.offsetWidth ?? 30;
+    const valueWidth = valueSpanRef.current?.offsetWidth ?? 40;
+    const handleBuffer = 8;
+    const leftThreshold = ((8 + labelWidth + handleBuffer) / trackWidth) * 100;
+    const rightThreshold = ((trackWidth - 8 - valueWidth - handleBuffer) / trackWidth) * 100;
+    const valueDodge = nextFillPercent < leftThreshold || nextFillPercent > rightThreshold;
+    const isActiveNow = options?.active ?? (isInteracting || isHovered);
+    const isDraggingNow = options?.dragging ?? isDragging;
+    const handleOpacity = !isActiveNow ? 0 : valueDodge ? 0.1 : isDraggingNow ? 0.9 : 0.5;
+
+    handleRef.current.style.left = `max(4px, calc(${clampedFillPercent}% - 1.5px))`;
+    handleRef.current.style.transform = `translateY(-50%) scaleX(${isActiveNow ? 1 : 0.25}) scaleY(${isActiveNow && valueDodge ? 0.75 : 1})`;
+    handleRef.current.style.opacity = String(handleOpacity);
+  }, [isDragging, isHovered, isInteracting]);
+
+  useEffect(() => {
+    localValueRef.current = localValue;
+    if (!isInteracting) {
+      updateDisplayedValue(localValue);
+    }
+  }, [isInteracting, localValue, updateDisplayedValue]);
+
+  useEffect(() => {
+    if (isInteracting) {
+      updateFillVisual(fillPercentRef.current, { active: true, dragging: isDragging });
+    } else {
+      fillPercentRef.current = fillPercent;
+      updateFillVisual(fillPercent, { active: isHovered, dragging: false });
+    }
+  }, [fillPercent, isDragging, isHovered, isInteracting, updateFillVisual]);
+
+  useEffect(() => {
+    rubberStretchRef.current = rubberStretch;
+    if (!isInteracting) {
+      updateStretchVisual(rubberStretch);
+    }
+  }, [isInteracting, rubberStretch, updateStretchVisual]);
+
   const positionToValue = useCallback(
     (clientX: number) => {
       const rect = rectRef.current;
@@ -203,21 +285,25 @@ export function SliderInput({
 
   const emitLiveChange = useCallback(
     (newValue: number) => {
-      if (onLiveChange) {
-        const now = performance.now();
-        if (now - lastLiveChangeRef.current >= LIVE_CHANGE_THROTTLE_MS) {
-          lastLiveChangeRef.current = now;
-          onLiveChange(newValue);
-        }
+      const handler = onLiveChange ?? onChange;
+      if (liveChangeThrottleMs <= 0) {
+        handler(newValue);
+        return;
+      }
+      const now = performance.now();
+      if (now - lastLiveChangeRef.current >= liveChangeThrottleMs) {
+        lastLiveChangeRef.current = now;
+        handler(newValue);
       }
     },
-    [onLiveChange]
+    [liveChangeThrottleMs, onChange, onLiveChange]
   );
 
   const openTextInput = useCallback(() => {
     const raw = formatInputValue
       ? formatInputValue(numericValue)
       : numericValue.toFixed(decimalsForStep(step));
+    cancelEditRef.current = false;
     setShowInput(true);
     showInputRef.current = true;
     setInputValue(raw);
@@ -225,7 +311,10 @@ export function SliderInput({
   }, [formatInputValue, numericValue, step]);
 
   const commitTextInput = useCallback(() => {
-    if (isSubmittingRef.current) return;
+    if (isSubmittingRef.current || cancelEditRef.current) {
+      cancelEditRef.current = false;
+      return;
+    }
     isSubmittingRef.current = true;
 
     const raw = inputValueRef.current;
@@ -233,7 +322,10 @@ export function SliderInput({
     if (!isNaN(parsed)) {
       const clamped = Math.max(min, Math.min(max, parsed));
       const rounded = roundToStep(clamped, step);
-      setFillPercent(((rounded - min) / (max - min)) * 100);
+      const nextFillPercent = ((rounded - min) / (max - min)) * 100;
+      fillPercentRef.current = nextFillPercent;
+      localValueRef.current = rounded;
+      setFillPercent(nextFillPercent);
       setLocalValue(rounded);
       onChange(rounded);
     }
@@ -291,25 +383,25 @@ export function SliderInput({
 
       if (!isClickRef.current) {
         const rect = rectRef.current;
+        let nextStretch = 0;
         if (rect) {
           if (e.clientX < rect.left) {
-            setRubberStretch(computeRubberStretch(e.clientX, -1));
+            nextStretch = computeRubberStretch(e.clientX, -1);
           } else if (e.clientX > rect.right) {
-            setRubberStretch(computeRubberStretch(e.clientX, 1));
-          } else {
-            setRubberStretch(0);
+            nextStretch = computeRubberStretch(e.clientX, 1);
           }
         }
+        updateStretchVisual(nextStretch);
 
         const newValue = positionToValue(e.clientX);
         const rounded = roundToStep(newValue, step);
         const pct = ((rounded - min) / (max - min)) * 100;
-        setFillPercent(pct);
-        setLocalValue(rounded);
+        updateFillVisual(pct, { active: true, dragging: true });
+        updateDisplayedValue(rounded);
         emitLiveChange(rounded);
       }
     },
-    [isInteracting, positionToValue, step, min, max, computeRubberStretch, emitLiveChange]
+    [isInteracting, positionToValue, step, min, max, computeRubberStretch, emitLiveChange, updateDisplayedValue, updateFillVisual, updateStretchVisual]
   );
 
   const handlePointerUp = useCallback(
@@ -333,26 +425,36 @@ export function SliderInput({
             : roundToStep(snapToDecile(rawValue, min, max), step);
 
         const targetPct = ((snappedValue - min) / (max - min)) * 100;
-        const currentPct = fillPercent;
+        const currentPct = fillPercentRef.current;
 
         cancelSpringRef.current = animateSpring(
           currentPct,
           targetPct,
-          (pct) => setFillPercent(pct),
-          () => { cancelSpringRef.current = null; }
+          (pct) => updateFillVisual(pct, { active: true, dragging: false }),
+          () => {
+            cancelSpringRef.current = null;
+            setFillPercent(targetPct);
+          }
         );
 
+        localValueRef.current = snappedValue;
         setLocalValue(snappedValue);
         onChange(roundToStep(snappedValue, step));
       } else {
-        if (localValue !== null) {
-          onChange(localValue);
+        if (localValueRef.current !== null) {
+          setFillPercent(fillPercentRef.current);
+          setLocalValue(localValueRef.current);
+          onChange(localValueRef.current);
         }
       }
 
-      if (rubberStretch !== 0) {
-        const startStretch = rubberStretch;
-        animateSpring(startStretch, 0, (v) => setRubberStretch(v), () => setRubberStretch(0));
+      if (rubberStretchRef.current !== 0) {
+        const startStretch = rubberStretchRef.current;
+        setRubberStretch(startStretch);
+        animateSpring(startStretch, 0, (v) => updateStretchVisual(v), () => {
+          updateStretchVisual(0);
+          setRubberStretch(0);
+        });
       }
 
       setIsInteracting(false);
@@ -363,7 +465,7 @@ export function SliderInput({
         document.activeElement.blur();
       }
     },
-    [isInteracting, positionToValue, min, max, step, fillPercent, onChange, localValue, rubberStretch]
+    [isInteracting, positionToValue, min, max, step, onChange, updateFillVisual, updateStretchVisual]
   );
 
   // Focus input when it appears
@@ -396,6 +498,7 @@ export function SliderInput({
     if (e.key === 'Enter') {
       commitTextInput();
     } else if (e.key === 'Escape') {
+      cancelEditRef.current = true;
       setShowInput(false);
       showInputRef.current = false;
     }
@@ -468,12 +571,13 @@ export function SliderInput({
 
         {/* Fill */}
         <div
+          ref={fillRef}
           className={cn(
             'absolute inset-y-0 left-0 rounded-md',
             'transition-colors duration-150'
           )}
           style={{
-            width: `${Math.max(0, Math.min(100, fillPercent))}%`,
+            width: `${Math.max(0, Math.min(100, fillPercentRef.current))}%`,
             background: isActive
               ? 'hsl(var(--foreground) / 0.12)'
               : 'hsl(var(--foreground) / 0.08)',
@@ -482,9 +586,10 @@ export function SliderInput({
 
         {/* Handle */}
         <div
+          ref={handleRef}
           className="absolute top-1/2 w-[3px] h-3.5 rounded-full bg-foreground/90 pointer-events-none"
           style={{
-            left: `max(4px, calc(${Math.max(0, Math.min(100, fillPercent))}% - 1.5px))`,
+            left: `max(4px, calc(${Math.max(0, Math.min(100, fillPercentRef.current))}% - 1.5px))`,
             transform: `translateY(-50%) scaleX(${isActive ? 1 : 0.25}) scaleY(${isActive && valueDodge ? 0.75 : 1})`,
             opacity: handleOpacity,
             transition: 'opacity 150ms, transform 200ms cubic-bezier(0.23, 1, 0.32, 1)',
@@ -532,4 +637,4 @@ export function SliderInput({
       </div>
     </div>
   );
-}
+});

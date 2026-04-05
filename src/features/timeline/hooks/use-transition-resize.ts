@@ -1,11 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { Transition } from '@/types/transition';
+import { usePlaybackStore } from '@/shared/state/playback';
 import { TRANSITION_CONFIGS } from '@/types/transition';
 import { useTimelineStore } from '../stores/timeline-store';
 import { useItemsStore } from '../stores/items-store';
 import { useTimelineZoom } from './use-timeline-zoom';
-import { useTransitionResizePreviewStore } from '../stores/transition-resize-preview-store';
 import type { TimelineState, TimelineActions } from '../types';
+import { getMaxTransitionDurationForHandles } from '../utils/transition-utils';
 
 type ResizeHandle = 'left' | 'right';
 
@@ -32,8 +33,27 @@ export function useTransitionResize(transition: Transition) {
   const updateTransition = useTimelineStore(
     (s: TimelineActions) => s.updateTransition
   );
+  const leftClip = useItemsStore(
+    useCallback((s) => s.itemById[transition.leftClipId] ?? null, [transition.leftClipId])
+  );
+  const rightClip = useItemsStore(
+    useCallback((s) => s.itemById[transition.rightClipId] ?? null, [transition.rightClipId])
+  );
 
   const config = TRANSITION_CONFIGS[transition.type];
+  const maxDuration = useMemo(() => {
+    if (!leftClip || !rightClip) return config.maxDuration;
+
+    const leftEnd = leftClip.from + leftClip.durationInFrames;
+    const isAdjacent = Math.abs(leftEnd - rightClip.from) <= 1;
+    if (!isAdjacent) {
+      const legacyMax = Math.floor(Math.min(leftClip.durationInFrames, rightClip.durationInFrames) - 1);
+      return Math.max(1, Math.max(transition.durationInFrames, Math.min(config.maxDuration, legacyMax)));
+    }
+
+    const handleMax = getMaxTransitionDurationForHandles(leftClip, rightClip, transition.alignment);
+    return Math.max(1, Math.max(transition.durationInFrames, Math.min(config.maxDuration, handleMax)));
+  }, [config.maxDuration, leftClip, rightClip, transition.alignment, transition.durationInFrames]);
 
   const [resizeState, setResizeState] = useState<ResizeState>({
     isResizing: false,
@@ -67,8 +87,8 @@ export function useTransitionResize(transition: Transition) {
 
       // Calculate new duration and clamp
       const newDuration = Math.max(
-        config.minDuration,
-        Math.min(config.maxDuration, resizeStateRef.current.initialDuration + deltaFrames)
+        1,
+        Math.min(maxDuration, resizeStateRef.current.initialDuration + deltaFrames)
       );
       const clampedDelta = newDuration - resizeStateRef.current.initialDuration;
 
@@ -76,10 +96,8 @@ export function useTransitionResize(transition: Transition) {
         ...prev,
         currentDelta: clampedDelta,
       }));
-
-      useTransitionResizePreviewStore.getState().setPreviewDuration(newDuration);
     },
-    [pixelsToTime, fps, config.minDuration, config.maxDuration]
+    [pixelsToTime, fps, maxDuration]
   );
 
   // Mouse up handler - commits changes to store
@@ -97,9 +115,6 @@ export function useTransitionResize(transition: Transition) {
     if (currentDelta !== 0) {
       updateTransition(transition.id, { durationInFrames: newDuration });
     }
-
-    useTransitionResizePreviewStore.getState().clearPreview();
-
     setResizeState({
       isResizing: false,
       handle: null,
@@ -117,11 +132,7 @@ export function useTransitionResize(transition: Transition) {
     (e: React.MouseEvent, handle: ResizeHandle) => {
       e.preventDefault();
       e.stopPropagation();
-
-      // Look up the right clip's committed position for ripple preview
-      const rightClip = useItemsStore.getState().items.find(
-        (i) => i.id === transition.rightClipId
-      );
+      usePlaybackStore.getState().setPreviewFrame(null);
 
       setResizeState({
         isResizing: true,
@@ -129,16 +140,6 @@ export function useTransitionResize(transition: Transition) {
         startX: e.clientX,
         initialDuration: transition.durationInFrames,
         currentDelta: 0,
-      });
-
-      useTransitionResizePreviewStore.getState().setPreview({
-        transitionId: transition.id,
-        previewDuration: transition.durationInFrames,
-        leftClipId: transition.leftClipId,
-        rightClipId: transition.rightClipId,
-        trackId: rightClip?.trackId ?? '',
-        rightClipFrom: rightClip?.from ?? 0,
-        committedDuration: transition.durationInFrames,
       });
 
       document.body.style.cursor = 'ew-resize';

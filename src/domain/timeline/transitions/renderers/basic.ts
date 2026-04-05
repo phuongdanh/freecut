@@ -17,13 +17,16 @@ function clamp01(value: number): number {
 }
 
 function calculateFadeOpacity(progress: number, isOutgoing: boolean): number {
+  // cos²/sin² weights — always sum to 1, preserving alpha for soft crop & masks.
+  const c = Math.cos((progress * Math.PI) / 2);
   if (isOutgoing) {
-    return Math.cos((progress * Math.PI) / 2);
+    return c * c;
   }
-  return Math.sin((progress * Math.PI) / 2);
+  return 1 - c * c;
 }
 
 const fadeRenderer: TransitionRenderer = {
+  gpuTransitionId: 'fade',
   calculateStyles(progress, isOutgoing): TransitionStyleCalculation {
     const p = clamp01(progress);
     return {
@@ -32,16 +35,17 @@ const fadeRenderer: TransitionRenderer = {
   },
   renderCanvas(ctx, leftCanvas, rightCanvas, progress) {
     const p = clamp01(progress);
+    const outgoingWeight = calculateFadeOpacity(p, true);
+    const incomingWeight = calculateFadeOpacity(p, false);
 
-    // Draw incoming clip (right) first.
+    // Soft crop/masks introduce real alpha, so fade needs to weight both
+    // participants instead of treating the incoming clip as a fully opaque bed.
     ctx.save();
-    ctx.globalAlpha = calculateFadeOpacity(p, false);
+    ctx.globalCompositeOperation = 'copy';
+    ctx.globalAlpha = incomingWeight;
     ctx.drawImage(rightCanvas, 0, 0);
-    ctx.restore();
-
-    // Draw outgoing clip (left) on top.
-    ctx.save();
-    ctx.globalAlpha = calculateFadeOpacity(p, true);
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.globalAlpha = outgoingWeight;
     ctx.drawImage(leftCanvas, 0, 0);
     ctx.restore();
   },

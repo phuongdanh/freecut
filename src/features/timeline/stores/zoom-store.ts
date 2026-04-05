@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 
+import { getZoomToFitLevel } from '../utils/timeline-layout';
+
 interface ZoomState {
   level: number;
   pixelsPerSecond: number;
@@ -71,15 +73,7 @@ export const useZoomStore = create<ZoomState & ZoomActions>((set) => ({
       return { level: newLevel, pixelsPerSecond: newLevel * 100 };
     }),
   zoomToFit: (containerWidth, contentDurationSeconds) => {
-    // Calculate zoom level needed to fit content in viewport
-    // pixelsPerSecond = zoomLevel * 100
-    // contentWidth = contentDuration * pixelsPerSecond = contentDuration * zoomLevel * 100
-    // We want: contentWidth = containerWidth (with some padding)
-    // So: zoomLevel = containerWidth / (contentDuration * 100)
-    const padding = 50; // Leave some padding on the right
-    const targetWidth = containerWidth - padding;
-    const duration = Math.max(10, contentDurationSeconds); // Minimum 10 seconds
-    const newLevel = Math.max(0.01, Math.min(2, targetWidth / (duration * 100)));
+    const newLevel = getZoomToFitLevel(containerWidth, contentDurationSeconds);
     set({ level: newLevel, pixelsPerSecond: newLevel * 100 });
   },
 }));

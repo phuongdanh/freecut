@@ -20,7 +20,8 @@ export const TIMELINE_SIDEBAR_WIDTH = EDITOR_LAYOUT.timelineSidebarWidth;
 // =============================================================================
 
 export const MIN_TRACK_HEIGHT = 48;
-export const MAX_TRACK_HEIGHT = 200;
+export const MAX_TRACK_HEIGHT = 140;
+export const TRACK_SECTION_DIVIDER_HEIGHT = 3;
 
 // Clip fills entire track height (selection ring is inset)
 const CLIP_HEIGHT = DEFAULT_TRACK_HEIGHT;
@@ -28,9 +29,9 @@ const CLIP_HEIGHT = DEFAULT_TRACK_HEIGHT;
 // Shared clip layout
 export const CLIP_LABEL_ROW_HEIGHT = EDITOR_LAYOUT.timelineClipLabelRowHeight;
 
-// Video clip layout (3 rows: label | filmstrip | waveform)
-export const VIDEO_WAVEFORM_HEIGHT = EDITOR_LAYOUT.timelineVideoWaveformHeight;
-const VIDEO_FILMSTRIP_HEIGHT = CLIP_HEIGHT - CLIP_LABEL_ROW_HEIGHT - VIDEO_WAVEFORM_HEIGHT;
+// Video clip layout (2 rows: label | filmstrip)
+const VIDEO_FILMSTRIP_HEIGHT = CLIP_HEIGHT - CLIP_LABEL_ROW_HEIGHT;
+const MAX_VIDEO_FILMSTRIP_HEIGHT = MAX_TRACK_HEIGHT - CLIP_LABEL_ROW_HEIGHT;
 
 // =============================================================================
 // FILMSTRIP / THUMBNAILS
@@ -38,6 +39,8 @@ const VIDEO_FILMSTRIP_HEIGHT = CLIP_HEIGHT - CLIP_LABEL_ROW_HEIGHT - VIDEO_WAVEF
 
 export const THUMBNAIL_HEIGHT = VIDEO_FILMSTRIP_HEIGHT;
 export const THUMBNAIL_WIDTH = Math.round(THUMBNAIL_HEIGHT * (16 / 9));
+export const FILMSTRIP_EXTRACT_HEIGHT = MAX_VIDEO_FILMSTRIP_HEIGHT;
+export const FILMSTRIP_EXTRACT_WIDTH = Math.round(FILMSTRIP_EXTRACT_HEIGHT * (16 / 9));
 
 // =============================================================================
 // TIMELINE LAYOUT
@@ -69,6 +72,10 @@ export const ZOOM_MIN_VELOCITY = 0.001;
 // Aliases for zoom limits (used by momentum code)
 export const ZOOM_MIN = MIN_ZOOM_LEVEL;
 export const ZOOM_MAX = MAX_ZOOM_LEVEL;
+
+// Temporary gate: keep slip/slide implementation in code, but hide the UI and
+// disable their keyboard shortcuts until the tools are ready to expose again.
+export const SLIP_SLIDE_TOOLS_ENABLED = false;
 
 // =============================================================================
 // COLORS

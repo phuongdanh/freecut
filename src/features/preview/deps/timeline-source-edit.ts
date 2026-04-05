@@ -6,4 +6,5 @@
 export {
   performInsertEdit,
   performOverwriteEdit,
+  resolveSourceEditTrackTargets,
 } from './timeline-contract';

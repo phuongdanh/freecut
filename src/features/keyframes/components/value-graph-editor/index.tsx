@@ -4,7 +4,7 @@
  */
 
 import { memo, useState, useCallback, useMemo, useEffect, useRef, useId } from 'react';
-import { ZoomIn, ZoomOut, Maximize2, RotateCcw, ChevronLeft, ChevronRight, Plus, Trash2, Magnet } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize2, RotateCcw, ChevronLeft, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { cn } from '@/shared/ui/cn';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -28,6 +28,7 @@ import { GraphTransitionRegions } from './graph-transition-regions';
 import { useGraphInteraction } from './use-graph-interaction';
 import { KeyframeSvgMarquee } from '../keyframe-marquee';
 import type { BlockedFrameRange } from '../../utils/transition-region';
+import { getCombinedGraphValueRange } from './value-range-utils';
 
 interface ValueGraphEditorProps {
   /** Shared time viewport when split mode needs synchronized frame zoom/pan */
@@ -40,18 +41,28 @@ interface ValueGraphEditorProps {
   keyframesByProperty: Partial<Record<AnimatableProperty, Keyframe[]>>;
   /** Currently selected property (or null to show all) */
   selectedProperty?: AnimatableProperty | null;
+  /** Additional properties to render as overlay curves (visual only, no interaction) */
+  overlayProperties?: AnimatableProperty[];
   /** Selected keyframe IDs */
   selectedKeyframeIds?: Set<string>;
   /** Current playhead frame */
   currentFrame?: number;
   /** Total duration in frames */
   totalFrames?: number;
+  /** Timeline FPS for time ruler formatting */
+  fps?: number;
   /** Width of the editor */
   width?: number;
   /** Height of the editor */
   height?: number;
   /** Callback when keyframe is moved */
   onKeyframeMove?: (ref: KeyframeRef, newFrame: number, newValue: number) => void;
+  /** Callback when keyframes are duplicated to explicit targets */
+  onDuplicateKeyframes?: (entries: Array<{ ref: KeyframeRef; frame: number; value: number }>) => void;
+  /** Optional frame preview override for external X-axis scrubbing */
+  previewFramesById?: Record<string, number> | null;
+  /** Optional frame-delta constraint for horizontal drags */
+  constrainFrameDelta?: (deltaFrames: number, draggedKeyframeIds: string[]) => number;
   /** Callback when bezier handles are moved */
   onBezierHandleMove?: (ref: KeyframeRef, bezier: BezierControlPoints) => void;
   /** Callback when selection changes */
@@ -74,6 +85,24 @@ interface ValueGraphEditorProps {
   onNavigateToKeyframe?: (frame: number) => void;
   /** Transition-blocked frame ranges (keyframes cannot be placed here) */
   transitionBlockedRanges?: BlockedFrameRange[];
+  /** Controls whether snapping is enabled */
+  snapEnabled?: boolean;
+  /** Whether to render the internal toolbar */
+  showToolbar?: boolean;
+  /** Whether to render the drag hint footer */
+  showKeyboardHints?: boolean;
+  /** Whether to remove the default graph border/radius */
+  borderless?: boolean;
+  /** Whether handles for all visible segments should be shown */
+  showAllHandles?: boolean;
+  /** How to render the time ruler */
+  rulerUnit?: 'frames' | 'seconds';
+  /** Automatically fit the Y range to the active curve values */
+  autoZoomGraphHeight?: boolean;
+  /** Optional externally controlled Y zoom level (0-100) */
+  externalValueZoomLevel?: number;
+  /** Hide X-axis labels when an external ruler provides them */
+  hideXLabels?: boolean;
   /** Whether the editor is disabled */
   disabled?: boolean;
   /** Additional class name */
@@ -90,12 +119,17 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
   itemId,
   keyframesByProperty,
   selectedProperty = null,
+  overlayProperties,
   selectedKeyframeIds = new Set(),
   currentFrame = 0,
   totalFrames = 300,
+  fps = 30,
   width = 600,
   height = 300,
   onKeyframeMove,
+  onDuplicateKeyframes,
+  previewFramesById = null,
+  constrainFrameDelta,
   onBezierHandleMove,
   onSelectionChange,
   onPropertyChange,
@@ -107,10 +141,24 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
   onRemoveKeyframes,
   onNavigateToKeyframe,
   transitionBlockedRanges = [],
+  snapEnabled: controlledSnapEnabled,
+  showToolbar = true,
+  showKeyboardHints = true,
+  borderless = false,
+  showAllHandles = false,
+  rulerUnit = 'frames',
+  autoZoomGraphHeight = false,
+  externalValueZoomLevel,
+  hideXLabels = false,
   disabled = false,
   className,
 }: ValueGraphEditorProps) {
-  const padding = DEFAULT_GRAPH_PADDING;
+  const padding = useMemo(
+    () => hideXLabels
+      ? { ...DEFAULT_GRAPH_PADDING, bottom: 8 }
+      : DEFAULT_GRAPH_PADDING,
+    [hideXLabels]
+  );
   const svgRef = useRef<SVGSVGElement>(null);
   const graphClipPathId = useId().replace(/[^a-zA-Z0-9_-]/g, '');
   
@@ -119,8 +167,8 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
   
   // Calculate heights for layout
   // Toolbar: ~28px (min-h-7), gaps: ~4px (gap-1)
-  const toolbarHeight = 28;
-  const gaps = 4; // gap-1 = 4px
+  const toolbarHeight = showToolbar ? 28 : 0;
+  const gaps = showToolbar ? 4 : 0;
   const totalFixedHeight = toolbarHeight + gaps;
   const graphHeight = Math.max(60, height - totalFixedHeight);
   const graphAreaWidth = width - padding.left - padding.right;
@@ -131,11 +179,18 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
     () => Object.keys(keyframesByProperty) as AnimatableProperty[],
     [keyframesByProperty]
   );
+  const visibleProperties = useMemo(
+    () => (overlayProperties && overlayProperties.length > 0
+      ? overlayProperties.filter((property) => availableProperties.includes(property))
+      : availableProperties),
+    [availableProperties, overlayProperties]
+  );
 
-  // Determine which property to show
-  const displayProperty = selectedProperty && availableProperties.includes(selectedProperty)
+  // Determine which property is active vs just visible
+  const displayProperty = selectedProperty && visibleProperties.includes(selectedProperty)
     ? selectedProperty
-    : availableProperties[0] || null;
+    : null;
+  const viewportProperty = displayProperty ?? visibleProperties[0] ?? null;
 
   // Get keyframes for the selected property
   const keyframes = useMemo(
@@ -144,7 +199,27 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
   );
 
   // Get property value range for fixed viewport bounds
-  const propertyRange = displayProperty ? PROPERTY_VALUE_RANGES[displayProperty] : null;
+  const propertyRange = viewportProperty ? PROPERTY_VALUE_RANGES[viewportProperty] : null;
+  const viewportValueRange = useMemo(
+    () => getCombinedGraphValueRange(
+      visibleProperties.map((property) => PROPERTY_VALUE_RANGES[property] ?? null),
+      visibleProperties.map((property) => keyframesByProperty[property] || []),
+      autoZoomGraphHeight
+    ),
+    [autoZoomGraphHeight, keyframesByProperty, visibleProperties]
+  );
+  const baseValueSpan = useMemo(
+    () => Math.max(0.0001, viewportValueRange.max - viewportValueRange.min),
+    [viewportValueRange]
+  );
+  const minZoomValueSpan = useMemo(
+    () => Math.max(baseValueSpan * 0.02, 0.0001),
+    [baseValueSpan]
+  );
+  const valueZoomRatioBase = useMemo(
+    () => Math.max(1, baseValueSpan / minZoomValueSpan),
+    [baseValueSpan, minZoomValueSpan]
+  );
 
   // Calculate viewport with fixed bounds based on property range and clip duration
   const calculateFittedViewport = useCallback((): GraphViewport => {
@@ -153,10 +228,10 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
       height: graphHeight,
       startFrame: 0,
       endFrame: Math.max(totalFrames, 60),
-      minValue: propertyRange?.min ?? 0,
-      maxValue: propertyRange?.max ?? 1,
+      minValue: viewportValueRange.min,
+      maxValue: viewportValueRange.max,
     };
-  }, [totalFrames, width, graphHeight, propertyRange]);
+  }, [totalFrames, width, graphHeight, viewportValueRange]);
 
   const [viewport, setViewport] = useState<GraphViewport>(() => calculateFittedViewport());
   const updateViewport = useCallback(
@@ -175,8 +250,7 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
     [onFrameViewportChange]
   );
   
-  // Snapping state
-  const [snapEnabled, setSnapEnabled] = useState(true);
+  const snapEnabled = controlledSnapEnabled ?? true;
 
   // Update viewport when keyframes or property changes
   useEffect(() => {
@@ -209,27 +283,119 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
     });
   }, [frameViewport]);
 
+  useEffect(() => {
+    if (externalValueZoomLevel === undefined) {
+      return;
+    }
+
+    setViewport((prev) => {
+      if (valueZoomRatioBase <= 1 || externalValueZoomLevel <= 0) {
+        if (prev.minValue === viewportValueRange.min && prev.maxValue === viewportValueRange.max) {
+          return prev;
+        }
+
+        return {
+          ...prev,
+          minValue: viewportValueRange.min,
+          maxValue: viewportValueRange.max,
+        };
+      }
+
+      const normalized = Math.max(0, Math.min(1, externalValueZoomLevel / 100));
+      const nextSpan = Math.max(
+        minZoomValueSpan,
+        baseValueSpan / Math.pow(valueZoomRatioBase, normalized)
+      );
+      const baseCenter = (viewportValueRange.min + viewportValueRange.max) / 2;
+      let center = (prev.minValue + prev.maxValue) / 2;
+
+      if (!Number.isFinite(center)) {
+        center = baseCenter;
+      }
+
+      let nextMin = center - nextSpan / 2;
+      let nextMax = center + nextSpan / 2;
+
+      if (nextMin < viewportValueRange.min) {
+        nextMax += viewportValueRange.min - nextMin;
+        nextMin = viewportValueRange.min;
+      }
+      if (nextMax > viewportValueRange.max) {
+        nextMin -= nextMax - viewportValueRange.max;
+        nextMax = viewportValueRange.max;
+      }
+
+      nextMin = Math.max(viewportValueRange.min, nextMin);
+      nextMax = Math.min(viewportValueRange.max, nextMax);
+
+      if (prev.minValue === nextMin && prev.maxValue === nextMax) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        minValue: nextMin,
+        maxValue: nextMax,
+      };
+    });
+  }, [
+    baseValueSpan,
+    externalValueZoomLevel,
+    minZoomValueSpan,
+    valueZoomRatioBase,
+    viewportValueRange,
+  ]);
+
+  const createPointsForProperty = useCallback(
+    (property: AnimatableProperty): GraphKeyframePoint[] => {
+      const propertyKeyframes = keyframesByProperty[property] || [];
+      const graphLeft = padding.left;
+      const graphTop = padding.top;
+      const graphWidth = viewport.width - padding.left - padding.right;
+      const graphHeight = viewport.height - padding.top - padding.bottom;
+      const frameRange = viewport.endFrame - viewport.startFrame;
+      const valueRange = Math.max(0.0001, viewport.maxValue - viewport.minValue);
+
+      return propertyKeyframes.map((keyframe) => ({
+        keyframe,
+        itemId,
+        property,
+        x: graphLeft + ((keyframe.frame - viewport.startFrame) / frameRange) * graphWidth,
+        y: graphTop + (1 - (keyframe.value - viewport.minValue) / valueRange) * graphHeight,
+        isSelected: selectedKeyframeIds.has(keyframe.id),
+        isDragging: false,
+      }));
+    },
+    [itemId, keyframesByProperty, padding, selectedKeyframeIds, viewport]
+  );
+
   // Convert keyframes to graph points
   const points = useMemo((): GraphKeyframePoint[] => {
     if (!displayProperty) return [];
+    return createPointsForProperty(displayProperty);
+  }, [createPointsForProperty, displayProperty]);
 
-    const graphLeft = padding.left;
-    const graphTop = padding.top;
-    const graphWidth = viewport.width - padding.left - padding.right;
-    const graphHeight = viewport.height - padding.top - padding.bottom;
-    const frameRange = viewport.endFrame - viewport.startFrame;
-    const valueRange = viewport.maxValue - viewport.minValue;
+  // Overlay curve colors (muted, distinct)
+  const OVERLAY_COLORS = ['#6366f1', '#22d3ee', '#a3e635', '#f472b6', '#fb923c', '#a78bfa', '#34d399'];
 
-    return keyframes.map((keyframe) => ({
-      keyframe,
-      itemId,
-      property: displayProperty,
-      x: graphLeft + ((keyframe.frame - viewport.startFrame) / frameRange) * graphWidth,
-      y: graphTop + (1 - (keyframe.value - viewport.minValue) / valueRange) * graphHeight,
-      isSelected: selectedKeyframeIds.has(keyframe.id),
-      isDragging: false,
-    }));
-  }, [displayProperty, keyframes, itemId, viewport, padding, selectedKeyframeIds]);
+  // Generate overlay points for additional properties (visual-only curves)
+  const overlayPointSets = useMemo((): Array<{ property: AnimatableProperty; points: GraphKeyframePoint[]; color: string }> => {
+    if (!overlayProperties || overlayProperties.length === 0) return [];
+
+    return overlayProperties
+      .filter((prop) => prop !== displayProperty) // skip the primary property
+      .map((prop, index) => {
+        const points = createPointsForProperty(prop);
+        if (points.length === 0) return null;
+
+        return { property: prop, points, color: OVERLAY_COLORS[index % OVERLAY_COLORS.length]! };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+  }, [OVERLAY_COLORS, createPointsForProperty, displayProperty, overlayProperties]);
+  const interactivePoints = useMemo(
+    () => [...points, ...overlayPointSets.flatMap((overlaySet) => overlaySet.points)],
+    [overlayPointSets, points]
+  );
 
   // Calculate snap targets for keyframe dragging
   const snapTargets = useMemo(() => {
@@ -277,6 +443,7 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
     isDragging,
     previewValues,
     draggingHandle,
+    previewBezierConfigs,
     constraintAxis,
     handleKeyframePointerDown,
     handleKeyframeClick,
@@ -293,14 +460,17 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
   } = useGraphInteraction({
     viewport,
     padding,
-    points,
+    points: interactivePoints,
     selectedKeyframeIds,
     maxFrame: totalFrames,
     minValue: displayProperty ? PROPERTY_VALUE_RANGES[displayProperty]?.min : undefined,
     maxValue: displayProperty ? PROPERTY_VALUE_RANGES[displayProperty]?.max : undefined,
     onViewportChange: updateViewport,
     onSelectionChange,
+    onBackgroundClick: () => onPropertyChange?.(null),
     onKeyframeMove,
+    onDuplicateKeyframes,
+    constrainFrameDelta,
     onBezierHandleMove,
     onDragStart,
     onDragEnd,
@@ -320,14 +490,14 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
       const graphWidth = viewport.width - padding.left - padding.right;
       const graphHeight = viewport.height - padding.top - padding.bottom;
       const frameRange = viewport.endFrame - viewport.startFrame;
-      const valueRange = viewport.maxValue - viewport.minValue;
 
-      return points.map((point) => {
+      return interactivePoints.map((point) => {
         const previewValue = previewValues[point.keyframe.id];
         if (previewValue) {
+          const pointValueRange = Math.max(0.0001, viewport.maxValue - viewport.minValue);
           // Calculate new screen position from preview values
           const newX = graphLeft + ((previewValue.frame - viewport.startFrame) / frameRange) * graphWidth;
-          const newY = graphTop + (1 - (previewValue.value - viewport.minValue) / valueRange) * graphHeight;
+          const newY = graphTop + (1 - (previewValue.value - viewport.minValue) / pointValueRange) * graphHeight;
           return {
             ...point,
             x: newX,
@@ -342,12 +512,86 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
       });
     }
 
+    if (previewFramesById) {
+      const graphLeft = padding.left;
+      const graphWidth = viewport.width - padding.left - padding.right;
+      const frameRange = viewport.endFrame - viewport.startFrame;
+
+      return interactivePoints.map((point) => {
+        const previewFrame = previewFramesById[point.keyframe.id];
+        if (previewFrame === undefined) {
+          return {
+            ...point,
+            isDragging: false,
+          };
+        }
+
+        return {
+          ...point,
+          x: graphLeft + ((previewFrame - viewport.startFrame) / frameRange) * graphWidth,
+          isDragging: true,
+        };
+      });
+    }
+
     // Not dragging - just update isDragging flag
-    return points.map((point) => ({
+    return interactivePoints.map((point) => ({
       ...point,
       isDragging: dragState?.draggedKeyframeIds?.includes(point.keyframe.id) ?? false,
     }));
-  }, [points, dragState, isDragging, previewValues, viewport, padding]);
+  }, [interactivePoints, dragState, isDragging, previewValues, previewFramesById, viewport, padding]);
+  const primaryPointsWithDragState = useMemo(
+    () => pointsWithDragState.filter((point) => point.property === displayProperty),
+    [displayProperty, pointsWithDragState]
+  );
+  const combinedPreviewValues = useMemo(() => {
+    if (!previewFramesById) {
+      return previewValues;
+    }
+
+    const mergedPreviewValues = previewValues ? { ...previewValues } : {};
+    let hasPreviewValue = previewValues !== null;
+
+    for (const point of interactivePoints) {
+      const previewFrame = previewFramesById[point.keyframe.id];
+      if (previewFrame === undefined) {
+        continue;
+      }
+
+      mergedPreviewValues[point.keyframe.id] = {
+        frame: previewFrame,
+        value: previewValues?.[point.keyframe.id]?.value ?? point.keyframe.value,
+      };
+      hasPreviewValue = true;
+    }
+
+    return hasPreviewValue ? mergedPreviewValues : null;
+  }, [interactivePoints, previewFramesById, previewValues]);
+  const overlayPointSetsWithDragState = useMemo(() => {
+    const pointById = new Map(pointsWithDragState.map((point) => [point.keyframe.id, point]));
+    return overlayPointSets.map((overlaySet) => ({
+      ...overlaySet,
+      points: overlaySet.points.map((point) => pointById.get(point.keyframe.id) ?? point),
+    }));
+  }, [overlayPointSets, pointsWithDragState]);
+  const handleVisibleKeyframePointerDown = useCallback(
+    (point: GraphKeyframePoint, event: React.PointerEvent) => {
+      if (point.property !== displayProperty) {
+        onPropertyChange?.(point.property);
+      }
+      handleKeyframePointerDown(point, event);
+    },
+    [displayProperty, handleKeyframePointerDown, onPropertyChange]
+  );
+  const handleVisibleKeyframeClick = useCallback(
+    (point: GraphKeyframePoint, event: React.MouseEvent) => {
+      if (point.property !== displayProperty) {
+        onPropertyChange?.(point.property);
+      }
+      handleKeyframeClick(point, event);
+    },
+    [displayProperty, handleKeyframeClick, onPropertyChange]
+  );
 
   // Reset viewport (fit to content)
   const resetViewport = useCallback(() => {
@@ -563,12 +807,16 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
     }, 100);
   }, [onScrubEnd]);
 
-  // Custom background click that respects scrubbing state
-  const handleGraphBackgroundClick = useCallback(
-    (event: React.MouseEvent) => {
-      // Don't deselect if we just finished scrubbing
+  const handleGraphCanvasClick = useCallback(
+    (event: React.MouseEvent<SVGSVGElement>) => {
       if (isScrrubbingRef.current) return;
-      handleBackgroundClick(event);
+
+      const target = event.target as Element | null;
+      if (target?.closest('.graph-keyframe, .bezier-handle, .graph-playhead')) {
+        return;
+      }
+
+      handleBackgroundClick(event as unknown as React.MouseEvent<SVGElement>);
     },
     [handleBackgroundClick]
   );
@@ -580,7 +828,6 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
 
     const handleNativeWheel = (e: WheelEvent) => {
       e.preventDefault();
-      e.stopPropagation();
     };
 
     svg.addEventListener('wheel', handleNativeWheel, { passive: false });
@@ -590,9 +837,13 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
   }, []);
 
   return (
-    <div className={cn('flex flex-col gap-1 h-full overflow-hidden', className)} style={{ height }}>
+    <div
+      className={cn('flex h-full flex-col overflow-hidden', showToolbar ? 'gap-1' : 'gap-0', className)}
+      style={{ height }}
+    >
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-2 flex-shrink-0 min-h-7">
+      {showToolbar && (
+        <div className="flex items-center justify-between px-2 flex-shrink-0 min-h-7">
         <div className="flex items-center gap-2">
           {/* Property selector */}
           <Select
@@ -688,30 +939,6 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
               {selectedKeyframeIds.size > 0 
                 ? `Remove ${selectedKeyframeIds.size} selected keyframe${selectedKeyframeIds.size !== 1 ? 's' : ''}`
                 : 'Remove selected keyframes'}
-            </TooltipContent>
-          </Tooltip>
-
-          {/* Separator */}
-          <div className="w-px h-4 bg-border mx-1" />
-
-          {/* Snapping toggle */}
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                className={cn(
-                  "h-7 w-7 p-0",
-                  snapEnabled && "bg-primary text-primary-foreground hover:bg-primary/90"
-                )}
-                onClick={() => setSnapEnabled(!snapEnabled)}
-                disabled={disabled}
-              >
-                <Magnet className="h-3.5 w-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              {snapEnabled ? 'Snapping enabled (hold Ctrl to disable temporarily)' : 'Enable snapping'}
             </TooltipContent>
           </Tooltip>
 
@@ -815,7 +1042,8 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
             <TooltipContent side="bottom">Reset view</TooltipContent>
           </Tooltip>
         </div>
-      </div>
+        </div>
+      )}
 
       {/* Graph */}
       <svg
@@ -823,13 +1051,15 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
         width={width}
         height={graphHeight}
         className={cn(
-          'border border-border rounded-md flex-shrink-0',
+          'flex-shrink-0',
+          !borderless && 'border border-border rounded-md',
           disabled && 'opacity-50 pointer-events-none'
         )}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
         onWheel={handleWheel}
+        onClick={handleGraphCanvasClick}
         style={{ 
           touchAction: 'none',
           cursor: isDragging && dragState?.type === 'keyframe' ? 'pointer' : undefined,
@@ -848,7 +1078,7 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
         </defs>
 
         {/* Grid background */}
-        <GraphGrid viewport={viewport} padding={padding} />
+        <GraphGrid viewport={viewport} padding={padding} rulerUnit={rulerUnit} fps={fps} showXLabels={!hideXLabels} />
 
         {/* Dedicated hit target for empty graph-space interactions */}
         <rect
@@ -859,7 +1089,6 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
           rx={4}
           fill="transparent"
           onPointerDown={handleBackgroundPointerDown}
-          onClick={handleGraphBackgroundClick}
         />
 
         <g clipPath={`url(#${graphClipPathId})`}>
@@ -873,10 +1102,17 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
           )}
 
           {/* Extension lines (before/after keyframes) */}
-          <GraphExtensionLines points={pointsWithDragState} viewport={viewport} padding={padding} />
+          <GraphExtensionLines points={primaryPointsWithDragState} viewport={viewport} padding={padding} />
 
-          {/* Interpolation curves */}
-          <GraphCurves points={pointsWithDragState} selectedKeyframeIds={selectedKeyframeIds} />
+          {/* Overlay curves for additional properties (rendered first, behind primary) */}
+          {overlayPointSetsWithDragState.map(({ property: prop, points: overlayPts, color }) => (
+            <g key={prop} opacity={0.5}>
+              <GraphCurves points={overlayPts} strokeColor={color} />
+            </g>
+          ))}
+
+          {/* Primary interpolation curves */}
+          <GraphCurves points={primaryPointsWithDragState} selectedKeyframeIds={selectedKeyframeIds} previewBezierConfigs={previewBezierConfigs} />
 
           {/* Playhead (rendered before keyframes so keyframes get click priority) */}
           <GraphPlayhead 
@@ -888,23 +1124,28 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
             onScrubStart={handlePlayheadScrubStart}
             onScrubEnd={handlePlayheadScrubEnd}
             disabled={disabled}
+            showVisuals={false}
           />
 
           {/* Bezier handles (for selected keyframes with cubic-bezier easing) */}
           <GraphHandles
-            points={pointsWithDragState}
+            points={primaryPointsWithDragState}
             selectedKeyframeIds={selectedKeyframeIds}
             onHandlePointerDown={handleBezierPointerDown}
             draggingHandle={draggingHandle}
+            previewBezierConfigs={previewBezierConfigs}
+            showAllHandles={showAllHandles}
             disabled={disabled}
           />
 
           {/* Keyframe points (rendered last for highest click priority) */}
           <GraphKeyframes
             points={pointsWithDragState}
-            previewValuesById={previewValues}
-            onPointerDown={handleKeyframePointerDown}
-            onClick={handleKeyframeClick}
+            previewValuesById={combinedPreviewValues}
+            onPointerDown={handleVisibleKeyframePointerDown}
+            onClick={handleVisibleKeyframeClick}
+            rulerUnit={rulerUnit}
+            fps={fps}
             disabled={disabled}
           />
 
@@ -953,7 +1194,7 @@ export const ValueGraphEditor = memo(function ValueGraphEditor({
       </svg>
 
       {/* Keyboard hints (shows when dragging) */}
-      {isDragging && dragState?.type === 'keyframe' && (
+      {showKeyboardHints && isDragging && dragState?.type === 'keyframe' && (
         <div className="text-xs text-muted-foreground text-center space-x-3">
           <span><kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">Shift</kbd> constrain axis</span>
           <span><kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">Alt</kbd> fine adjust</span>

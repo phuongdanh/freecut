@@ -12,13 +12,21 @@
  */
 
 import { useSyncExternalStore, useRef, useCallback } from 'react';
-import type { TimelineState, TimelineActions } from '../types';
+import type { TimelineState, TimelineActions, LoadTimelineOptions } from '../types';
 import type { ItemKeyframes } from '@/types/keyframe';
-import type { TimelineItem, TimelineTrack } from '@/types/timeline';
+import type { AudioItem, CompositionItem, TimelineItem, TimelineTrack } from '@/types/timeline';
 import type { Transition } from '@/types/transition';
 
 import { createLogger } from '@/shared/logging/logger';
 import { DEFAULT_TRACK_HEIGHT } from '../constants';
+import {
+  createClassicTrack,
+  createDefaultClassicTracks,
+  findNearestTrackByKind,
+  getAdjacentTrackOrder,
+  getTrackKind,
+} from '../utils/classic-tracks';
+import { timelineToSourceFrames } from '../utils/source-calculations';
 
 const logger = createLogger('TimelineStore');
 
@@ -45,9 +53,21 @@ import {
   convertTimelineToComposition,
 } from '@/features/timeline/deps/export-contract';
 import { resolveMediaUrls } from '@/features/timeline/deps/media-library-resolver';
-import { validateMediaReferences } from '@/features/timeline/utils/media-validation';
+import { mediaLibraryService } from '@/features/timeline/deps/media-library-service';
+import { validateProjectMediaReferences } from '@/features/timeline/utils/media-validation';
 import { useMediaLibraryStore } from '@/features/timeline/deps/media-library-store';
+import { useSettingsStore } from '@/features/timeline/deps/settings-contract';
 import { migrateProject, CURRENT_SCHEMA_VERSION } from '@/domain/projects/migrations';
+import {
+  needsLegacyAvTrackLayoutRepair,
+  repairLegacyAvTrackLayout,
+} from '@/features/timeline/utils/legacy-av-track-repair';
+import { getCompositionOwnedAudioSources } from '@/features/timeline/utils/composition-clip-summary';
+import type { Project } from '@/types/project';
+import {
+  getLinkedCompositionAudioCompanion,
+  isCompositionAudioItem,
+} from '@/shared/utils/linked-media';
 
 
 /**
@@ -83,20 +103,452 @@ async function scaleCanvasToBlob(
   return out.convertToBlob({ type: 'image/jpeg', quality });
 }
 
+function collectVideoMediaIds(project: Project): string[] {
+  const mediaIds = new Set<string>();
+  const timeline = project.timeline;
+  if (!timeline) return [];
+
+  for (const item of timeline.items ?? []) {
+    if (item.type === 'video' && item.mediaId) {
+      mediaIds.add(item.mediaId);
+    }
+  }
+
+  for (const composition of timeline.compositions ?? []) {
+    for (const item of composition.items ?? []) {
+      if (item.type === 'video' && item.mediaId) {
+        mediaIds.add(item.mediaId);
+      }
+    }
+  }
+
+  return [...mediaIds];
+}
+
+function cloneTransitionForProject(transition: Transition): Transition {
+  return {
+    ...transition,
+    ...(transition.bezierPoints && { bezierPoints: { ...transition.bezierPoints } }),
+    ...(transition.properties && { properties: { ...transition.properties } }),
+  };
+}
+
+async function buildVideoHasAudioMap(mediaIds: string[]): Promise<Record<string, boolean | undefined>> {
+  const mediaById = useMediaLibraryStore.getState().mediaById;
+  const entries = await Promise.all(mediaIds.map(async (mediaId) => {
+    const cachedMedia = mediaById[mediaId];
+    if (cachedMedia) {
+      return [mediaId, !!cachedMedia.audioCodec] as const;
+    }
+
+    const media = await mediaLibraryService.getMedia(mediaId);
+    return [mediaId, !!media?.audioCodec] as const;
+  }));
+
+  return Object.fromEntries(entries);
+}
+
+function normalizeCompoundWrapperSourceFields(params: {
+  item: CompositionItem | (AudioItem & { compositionId: string });
+  compositionFps: number;
+  timelineFps: number;
+  fallbackDurationInFrames: number;
+}) {
+  const { item, compositionFps, timelineFps, fallbackDurationInFrames } = params;
+  const sourceFps = item.sourceFps ?? compositionFps;
+  const speed = item.speed ?? 1;
+  const sourceStart = item.sourceStart ?? 0;
+  const inferredSourceDuration = timelineToSourceFrames(
+    item.durationInFrames || fallbackDurationInFrames,
+    speed,
+    timelineFps,
+    sourceFps,
+  );
+
+  return {
+    sourceStart,
+    sourceEnd: item.sourceEnd ?? (sourceStart + inferredSourceDuration),
+    sourceDuration: item.sourceDuration ?? fallbackDurationInFrames,
+    sourceFps,
+    speed,
+  };
+}
+
+function hasCompositionVisualItems(items: TimelineItem[]): boolean {
+  return items.some((item) => item.type !== 'audio');
+}
+
+function cleanupRedundantEmptyClassicAudioTracks(project: Project): { project: Project; cleaned: boolean } {
+  if (!project.timeline?.tracks?.length) {
+    return { project, cleaned: false };
+  }
+
+  const itemsByTrackId = new Map<string, number>();
+  for (const item of project.timeline.items ?? []) {
+    itemsByTrackId.set(item.trackId, (itemsByTrackId.get(item.trackId) ?? 0) + 1);
+  }
+
+  const classicAudioTracks = (project.timeline.tracks as TimelineTrack[])
+    .map((track) => {
+      const match = track.name.match(/^A(\d+)$/i);
+      return match
+        ? { track, number: Number.parseInt(match[1]!, 10) }
+        : null;
+    })
+    .filter((entry): entry is { track: TimelineTrack; number: number } => !!entry)
+    .filter(({ track, number }) => getTrackKind(track) === 'audio' && Number.isFinite(number));
+
+  const highestOccupiedClassicAudioNumber = classicAudioTracks.reduce((highest, { track, number }) => {
+    return (itemsByTrackId.get(track.id) ?? 0) > 0
+      ? Math.max(highest, number)
+      : highest;
+  }, 0);
+
+  if (highestOccupiedClassicAudioNumber <= 0) {
+    return { project, cleaned: false };
+  }
+
+  const removableTrackIds = new Set(
+    classicAudioTracks
+      .filter(({ track, number }) => number > highestOccupiedClassicAudioNumber && (itemsByTrackId.get(track.id) ?? 0) === 0)
+      .map(({ track }) => track.id),
+  );
+
+  if (removableTrackIds.size === 0) {
+    return { project, cleaned: false };
+  }
+
+  return {
+    cleaned: true,
+    project: {
+      ...project,
+      timeline: {
+        ...project.timeline,
+        tracks: project.timeline.tracks.filter((track) => !removableTrackIds.has(track.id)),
+      },
+    },
+  };
+}
+
+function repairCompoundClipWrappers(project: Project): { project: Project; repaired: boolean } {
+  if (!project.timeline?.tracks || !project.timeline.items || !project.timeline.compositions?.length) {
+    return { project, repaired: false };
+  }
+
+  let tracks = project.timeline.tracks.map((track) => ({ ...track })) as TimelineTrack[];
+  const items = project.timeline.items.map((item) => ({ ...item })) as TimelineItem[];
+  const compositionsById = new Map((project.timeline.compositions ?? []).map((composition) => [composition.id, composition]));
+  const timelineFps = project.metadata?.fps ?? 30;
+  let changed = false;
+
+  const ensureTrackOfKindNear = (
+    baseTrackId: string,
+    kind: 'video' | 'audio',
+    direction: 'above' | 'below',
+  ): string => {
+    const baseTrack = tracks.find((track) => track.id === baseTrackId) ?? null;
+    if (!baseTrack) return baseTrackId;
+
+    const nearestTrack = findNearestTrackByKind({
+      tracks,
+      targetTrack: baseTrack,
+      kind,
+      direction,
+    });
+    if (nearestTrack) return nearestTrack.id;
+
+    const createdTrack = createClassicTrack({
+      tracks,
+      kind,
+      order: getAdjacentTrackOrder(tracks, baseTrack, direction),
+      height: baseTrack.height ?? DEFAULT_TRACK_HEIGHT,
+    });
+    tracks = [...tracks, createdTrack];
+    changed = true;
+    return createdTrack.id;
+  };
+
+  const compositionWrappers = items.filter((item): item is CompositionItem => item.type === 'composition');
+  for (const wrapper of compositionWrappers) {
+    const composition = compositionsById.get(wrapper.compositionId);
+    if (!composition) continue;
+
+    const wrapperIndex = items.findIndex((item) => item.id === wrapper.id);
+    if (wrapperIndex === -1) continue;
+
+    const hasVisualWrapper = hasCompositionVisualItems(composition.items as TimelineItem[]);
+    const hasOwnedAudio = getCompositionOwnedAudioSources({
+      items: composition.items as TimelineItem[],
+      tracks: composition.tracks as TimelineTrack[],
+      fps: composition.fps,
+    }).length > 0;
+    const wrapperTrack = tracks.find((track) => track.id === wrapper.trackId) ?? null;
+    const wrapperTrackKind = wrapperTrack ? getTrackKind(wrapperTrack) : null;
+    const existingAudioCompanion = getLinkedCompositionAudioCompanion(items, wrapper)
+      ?? items.find((item): item is AudioItem & { compositionId: string } => (
+        item.id !== wrapper.id
+        && isCompositionAudioItem(item)
+        && item.compositionId === wrapper.compositionId
+      ))
+      ?? null;
+    const sourceFields = normalizeCompoundWrapperSourceFields({
+      item: wrapper,
+      compositionFps: composition.fps,
+      timelineFps,
+      fallbackDurationInFrames: composition.durationInFrames,
+    });
+
+    if (!hasVisualWrapper && hasOwnedAudio) {
+      const audioTrackId = wrapperTrackKind === 'audio'
+        ? wrapper.trackId
+        : existingAudioCompanion?.trackId
+        ? existingAudioCompanion.trackId
+        : ensureTrackOfKindNear(wrapper.trackId, 'audio', 'below');
+      items[wrapperIndex] = {
+        ...wrapper,
+        type: 'audio',
+        trackId: audioTrackId,
+        src: '',
+        ...sourceFields,
+      } as AudioItem;
+      changed = true;
+      continue;
+    }
+
+    const visualTrackId = hasVisualWrapper && wrapperTrackKind === 'audio'
+      ? ensureTrackOfKindNear(wrapper.trackId, 'video', 'above')
+      : wrapper.trackId;
+    const audioTrackId = hasOwnedAudio
+      ? (existingAudioCompanion?.trackId
+          ?? (wrapperTrackKind === 'audio'
+          ? wrapper.trackId
+          : ensureTrackOfKindNear(visualTrackId, 'audio', 'below')))
+      : null;
+    const linkedGroupId = hasOwnedAudio
+      ? existingAudioCompanion?.linkedGroupId ?? wrapper.linkedGroupId ?? crypto.randomUUID()
+      : wrapper.linkedGroupId;
+
+    const nextWrapper: CompositionItem = {
+      ...wrapper,
+      trackId: visualTrackId,
+      linkedGroupId,
+      ...sourceFields,
+    };
+    items[wrapperIndex] = nextWrapper;
+    if (
+      nextWrapper.trackId !== wrapper.trackId
+      || nextWrapper.linkedGroupId !== wrapper.linkedGroupId
+      || nextWrapper.sourceStart !== wrapper.sourceStart
+      || nextWrapper.sourceEnd !== wrapper.sourceEnd
+      || nextWrapper.sourceDuration !== wrapper.sourceDuration
+      || nextWrapper.sourceFps !== wrapper.sourceFps
+      || nextWrapper.speed !== wrapper.speed
+    ) {
+      changed = true;
+    }
+
+    const companionIndex = items.findIndex((item) => (
+      item.id !== nextWrapper.id
+      && isCompositionAudioItem(item)
+      && item.compositionId === nextWrapper.compositionId
+      && (!linkedGroupId || item.linkedGroupId === linkedGroupId || item.linkedGroupId === existingAudioCompanion?.linkedGroupId)
+    ));
+
+    if (!hasOwnedAudio) {
+      if (companionIndex !== -1) {
+        items.splice(companionIndex, 1);
+        changed = true;
+      }
+      continue;
+    }
+
+    if (!audioTrackId) continue;
+
+    if (companionIndex === -1) {
+      items.push({
+        id: crypto.randomUUID(),
+        type: 'audio',
+        trackId: audioTrackId,
+        from: nextWrapper.from,
+        durationInFrames: nextWrapper.durationInFrames,
+        label: nextWrapper.label,
+        linkedGroupId,
+        compositionId: nextWrapper.compositionId,
+        src: '',
+        ...sourceFields,
+      } satisfies AudioItem);
+      changed = true;
+      continue;
+    }
+
+    const existingCompanion = items[companionIndex] as AudioItem & { compositionId: string };
+    const companionSourceFields = normalizeCompoundWrapperSourceFields({
+      item: existingCompanion,
+      compositionFps: composition.fps,
+      timelineFps,
+      fallbackDurationInFrames: composition.durationInFrames,
+    });
+    const normalizedCompanion: AudioItem & { compositionId: string } = {
+      ...existingCompanion,
+      trackId: audioTrackId,
+      from: nextWrapper.from,
+      durationInFrames: nextWrapper.durationInFrames,
+      label: nextWrapper.label,
+      linkedGroupId,
+      compositionId: nextWrapper.compositionId,
+      src: existingCompanion.src || '',
+      ...companionSourceFields,
+    };
+    items[companionIndex] = normalizedCompanion;
+    if (
+      normalizedCompanion.trackId !== existingCompanion.trackId
+      || normalizedCompanion.from !== existingCompanion.from
+      || normalizedCompanion.durationInFrames !== existingCompanion.durationInFrames
+      || normalizedCompanion.label !== existingCompanion.label
+      || normalizedCompanion.linkedGroupId !== existingCompanion.linkedGroupId
+      || normalizedCompanion.sourceStart !== existingCompanion.sourceStart
+      || normalizedCompanion.sourceEnd !== existingCompanion.sourceEnd
+      || normalizedCompanion.sourceDuration !== existingCompanion.sourceDuration
+      || normalizedCompanion.sourceFps !== existingCompanion.sourceFps
+      || normalizedCompanion.speed !== existingCompanion.speed
+      || normalizedCompanion.src !== existingCompanion.src
+    ) {
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return { project, repaired: false };
+  }
+
+  return {
+    repaired: true,
+    project: {
+      ...project,
+      timeline: {
+        ...project.timeline,
+        tracks: tracks as typeof project.timeline.tracks,
+        items: items as typeof project.timeline.items,
+      },
+    },
+  };
+}
+
+async function repairLegacyProjectAvLayouts(project: Project): Promise<{ project: Project; repaired: boolean }> {
+  if (!project.timeline) {
+    return { project, repaired: false };
+  }
+
+  const videoMediaIds = collectVideoMediaIds(project);
+  const videoHasAudioByMediaId = videoMediaIds.length > 0
+    ? await buildVideoHasAudioMap(videoMediaIds)
+    : {};
+  const rootItems = (project.timeline.items ?? []) as TimelineItem[];
+  const rootRepair = needsLegacyAvTrackLayoutRepair({
+    tracks: (project.timeline.tracks ?? []) as TimelineTrack[],
+    items: rootItems,
+  })
+    ? repairLegacyAvTrackLayout({
+        tracks: (project.timeline.tracks ?? []) as TimelineTrack[],
+        items: rootItems,
+        keyframes: (project.timeline.keyframes ?? []) as ItemKeyframes[],
+        fps: project.metadata.fps,
+        videoHasAudioByMediaId,
+      })
+    : {
+        tracks: (project.timeline.tracks ?? []) as TimelineTrack[],
+        items: rootItems,
+        keyframes: (project.timeline.keyframes ?? []) as ItemKeyframes[],
+        changed: false,
+      };
+  const repairedCompositions = (project.timeline.compositions ?? []).map((composition) => {
+    const compositionTracks = composition.tracks as TimelineTrack[];
+    const compositionItems = composition.items as TimelineItem[];
+    const repair = needsLegacyAvTrackLayoutRepair({
+      tracks: compositionTracks,
+      items: compositionItems,
+    })
+      ? repairLegacyAvTrackLayout({
+          tracks: compositionTracks,
+          items: compositionItems,
+          keyframes: (composition.keyframes ?? []) as ItemKeyframes[],
+          fps: composition.fps,
+          videoHasAudioByMediaId,
+        })
+      : {
+          tracks: compositionTracks,
+          items: compositionItems,
+          keyframes: (composition.keyframes ?? []) as ItemKeyframes[],
+          changed: false,
+        };
+
+    return {
+      repair,
+      composition: repair.changed
+        ? {
+          ...composition,
+          tracks: repair.tracks as typeof composition.tracks,
+          items: repair.items as typeof composition.items,
+          keyframes: repair.keyframes as typeof composition.keyframes,
+        }
+        : composition,
+    };
+  });
+
+  const repairedLayoutProject: Project = {
+    ...project,
+    timeline: {
+      ...project.timeline,
+      tracks: rootRepair.tracks as typeof project.timeline.tracks,
+      items: rootRepair.items as typeof project.timeline.items,
+      keyframes: rootRepair.keyframes as typeof project.timeline.keyframes,
+      compositions: repairedCompositions.map((entry) => entry.composition),
+    },
+  };
+  const repairedCompoundWrappers = repairCompoundClipWrappers(repairedLayoutProject);
+  const cleanedEmptyAudioTracks = cleanupRedundantEmptyClassicAudioTracks(repairedCompoundWrappers.project);
+
+  const repaired = rootRepair.changed
+    || repairedCompositions.some((entry) => entry.repair.changed)
+    || repairedCompoundWrappers.repaired
+    || cleanedEmptyAudioTracks.cleaned;
+  if (!repaired) {
+    return { project, repaired: false };
+  }
+
+  return {
+    repaired: true,
+    project: cleanedEmptyAudioTracks.project,
+  };
+}
+
 /**
  * Save timeline to project in IndexedDB.
  */
 async function saveTimeline(projectId: string): Promise<void> {
   // If currently editing a sub-composition, navigate back to root to save
-  // the main timeline data, then re-enter after save completes.
+  // the main timeline data, then restore the full breadcrumb path after save completes.
   const navStore = useCompositionNavigationStore.getState();
-  const previousCompositionId = navStore.activeCompositionId;
-  const previousLabel = previousCompositionId
-    ? navStore.breadcrumbs.find((b) => b.compositionId === previousCompositionId)?.label ?? ''
-    : '';
-  if (previousCompositionId !== null) {
+  const previousBreadcrumbs = navStore.breadcrumbs
+    .filter((breadcrumb) => breadcrumb.compositionId !== null)
+    .map((breadcrumb) => ({
+      compositionId: breadcrumb.compositionId!,
+      label: breadcrumb.label,
+      entryItemId: breadcrumb.entryItemId,
+    }));
+  if (previousBreadcrumbs.length > 0) {
     navStore.resetToRoot();
   }
+
+  const restoreCompositionPath = () => {
+    for (const breadcrumb of previousBreadcrumbs) {
+      useCompositionNavigationStore.getState().enterComposition(
+        breadcrumb.compositionId,
+        breadcrumb.label,
+        breadcrumb.entryItemId,
+      );
+    }
+  };
 
   // Read directly from domain stores
   const itemsState = useItemsStore.getState();
@@ -132,17 +584,7 @@ async function saveTimeline(projectId: string): Promise<void> {
         })),
       }),
       ...(transitionsState.transitions.length > 0 && {
-        transitions: transitionsState.transitions.map((t) => ({
-          id: t.id,
-          type: t.type,
-          leftClipId: t.leftClipId,
-          rightClipId: t.rightClipId,
-          trackId: t.trackId,
-          durationInFrames: t.durationInFrames,
-          presentation: t.presentation,
-          ...(t.timing && { timing: t.timing }),
-          ...(t.direction && { direction: t.direction }),
-        })),
+        transitions: transitionsState.transitions.map(cloneTransitionForProject),
       }),
       ...(keyframesState.keyframes.length > 0 && {
         keyframes: keyframesState.keyframes.map((ik) => ({
@@ -169,7 +611,9 @@ async function saveTimeline(projectId: string): Promise<void> {
             name: c.name,
             items: c.items as ProjectTimeline['items'],
             tracks: c.tracks as ProjectTimeline['tracks'],
-            ...(c.transitions?.length && { transitions: c.transitions as ProjectTimeline['transitions'] }),
+            ...(c.transitions?.length && {
+              transitions: c.transitions.map(cloneTransitionForProject) as ProjectTimeline['transitions'],
+            }),
             ...(c.keyframes?.length && { keyframes: c.keyframes as ProjectTimeline['keyframes'] }),
             fps: c.fps,
             width: c.width,
@@ -277,14 +721,14 @@ async function saveTimeline(projectId: string): Promise<void> {
     useTimelineSettingsStore.getState().markClean();
 
     // Re-enter the sub-composition the user was editing before save
-    if (previousCompositionId !== null) {
-      useCompositionNavigationStore.getState().enterComposition(previousCompositionId, previousLabel);
+    if (previousBreadcrumbs.length > 0) {
+      restoreCompositionPath();
     }
   } catch (error) {
     logger.error('Failed to save timeline:', error);
     // Re-enter even on failure so user doesn't lose their editing context
-    if (previousCompositionId !== null) {
-      useCompositionNavigationStore.getState().enterComposition(previousCompositionId, previousLabel);
+    if (previousBreadcrumbs.length > 0) {
+      restoreCompositionPath();
     }
     throw error;
   }
@@ -301,7 +745,10 @@ async function saveTimeline(projectId: string): Promise<void> {
  * 4. Persists migrated projects back to storage
  * 5. Restores timeline state to stores
  */
-async function loadTimeline(projectId: string): Promise<void> {
+async function loadTimeline(
+  projectId: string,
+  options: LoadTimelineOptions = {}
+): Promise<void> {
   // Mark loading started - used to coordinate initial player sync
   useTimelineSettingsStore.getState().setTimelineLoading(true);
 
@@ -311,17 +758,28 @@ async function loadTimeline(projectId: string): Promise<void> {
       throw new Error(`Project not found: ${projectId}`);
     }
 
+    const storedSchemaVersion = rawProject.schemaVersion ?? 1;
+    const requiresUpgrade = storedSchemaVersion < CURRENT_SCHEMA_VERSION;
+    if (requiresUpgrade && !options.allowProjectUpgrade) {
+      throw new Error(
+        `Project schema v${storedSchemaVersion} requires confirmation before upgrading to v${CURRENT_SCHEMA_VERSION}`
+      );
+    }
+
     // Run migrations and normalization
     const migrationResult = migrateProject(rawProject);
-    const project = migrationResult.project;
+    const repairedLegacyLayouts = await repairLegacyProjectAvLayouts(migrationResult.project);
+    const project = repairedLegacyLayouts.project;
 
     // Log migration activity
-    if (migrationResult.migrated) {
+    if (migrationResult.migrated || repairedLegacyLayouts.repaired) {
       if (migrationResult.appliedMigrations.length > 0) {
         logger.info(
           `Migrated project from v${migrationResult.fromVersion} to v${migrationResult.toVersion}`,
           { migrations: migrationResult.appliedMigrations }
         );
+      } else if (repairedLegacyLayouts.repaired) {
+        logger.info('Repaired legacy A/V track layout for project', { projectId });
       } else {
         logger.debug('Project normalized with current defaults');
       }
@@ -404,19 +862,7 @@ async function loadTimeline(projectId: string): Promise<void> {
       logger.debug('loadTimeline: initializing new project with default track');
 
       // Initialize with default tracks for new projects
-      useItemsStore.getState().setTracks([
-        {
-          id: 'track-1',
-          name: 'Track 1',
-          height: DEFAULT_TRACK_HEIGHT,
-          locked: false,
-          visible: true,
-          muted: false,
-          solo: false,
-          order: 0,
-          items: [],
-        },
-      ]);
+      useItemsStore.getState().setTracks(createDefaultClassicTracks(DEFAULT_TRACK_HEIGHT));
       useItemsStore.getState().setItems([]);
       useTransitionsStore.getState().setTransitions([]);
       useKeyframesStore.getState().setKeyframes([]);
@@ -433,8 +879,8 @@ async function loadTimeline(projectId: string): Promise<void> {
     // Common setup for both cases
     // fps is stored in project.metadata, not timeline
     useTimelineSettingsStore.getState().setFps(project.metadata?.fps || 30);
-    // snapEnabled is UI state, default to true
-    useTimelineSettingsStore.getState().setSnapEnabled(true);
+    // snapEnabled is UI state, seeded from the app-level default
+    useTimelineSettingsStore.getState().setSnapEnabled(useSettingsStore.getState().snapEnabled);
     useTimelineSettingsStore.getState().markClean();
 
     // Clear undo history when loading
@@ -442,7 +888,11 @@ async function loadTimeline(projectId: string): Promise<void> {
 
     // Validate media references after loading timeline
     const loadedItems = useItemsStore.getState().items;
-    const orphans = await validateMediaReferences(loadedItems, projectId);
+    const orphans = await validateProjectMediaReferences({
+      rootItems: loadedItems,
+      compositions: useCompositionsStore.getState().compositions,
+      projectId,
+    });
     if (orphans.length > 0) {
       logger.warn(`Found ${orphans.length} orphaned clip(s) referencing deleted media`);
       useMediaLibraryStore.getState().setOrphanedClips(orphans);
@@ -536,11 +986,6 @@ function getSnapshot(): TimelineState & TimelineActions {
 
       // Actions (static references, never change)
       setTracks: timelineActions.setTracks,
-      createGroup: timelineActions.createGroup,
-      ungroup: timelineActions.ungroup,
-      toggleGroupCollapse: timelineActions.toggleGroupCollapse,
-      addToGroup: timelineActions.addToGroup,
-      removeFromGroup: timelineActions.removeFromGroup,
       addItem: timelineActions.addItem,
       addItems: timelineActions.addItems,
       updateItem: timelineActions.updateItem,
@@ -552,14 +997,18 @@ function getSnapshot(): TimelineState & TimelineActions {
       setScrollPosition: timelineActions.setScrollPosition,
       moveItem: timelineActions.moveItem,
       moveItems: timelineActions.moveItems,
+      moveItemsWithTrackChanges: timelineActions.moveItemsWithTrackChanges,
       duplicateItems: timelineActions.duplicateItems,
+      duplicateItemsWithTrackChanges: timelineActions.duplicateItemsWithTrackChanges,
       trimItemStart: timelineActions.trimItemStart,
       trimItemEnd: timelineActions.trimItemEnd,
       rollingTrimItems: timelineActions.rollingTrimItems,
       rippleTrimItem: timelineActions.rippleTrimItem,
       splitItem: timelineActions.splitItem,
+      splitItemAtFrames: timelineActions.splitItemAtFrames,
       joinItems: timelineActions.joinItems,
       rateStretchItem: timelineActions.rateStretchItem,
+      resetSpeedWithRipple: timelineActions.resetSpeedWithRipple,
       setInPoint: timelineActions.setInPoint,
       setOutPoint: timelineActions.setOutPoint,
       clearInOutPoints: timelineActions.clearInOutPoints,
@@ -590,6 +1039,7 @@ function getSnapshot(): TimelineState & TimelineActions {
       removeKeyframesForProperty: timelineActions.removeKeyframesForProperty,
       getKeyframesForItem: timelineActions.getKeyframesForItem,
       hasKeyframesAtFrame: timelineActions.hasKeyframesAtFrame,
+      repairLegacyAvTracks: timelineActions.repairLegacyAvTracks,
       clearTimeline: timelineActions.clearTimeline,
       markDirty: timelineActions.markDirty,
       markClean: timelineActions.markClean,

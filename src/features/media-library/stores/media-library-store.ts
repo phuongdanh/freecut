@@ -1,6 +1,12 @@
 ﻿import { create } from 'zustand';
 import { devtools } from 'zustand/middleware';
-import type { MediaLibraryState, MediaLibraryActions, MediaLibraryNotification, BrokenMediaInfo, UnsupportedCodecFile } from '../types';
+import type {
+  MediaLibraryState,
+  MediaLibraryActions,
+  MediaLibraryNotification,
+  BrokenMediaInfo,
+  UnsupportedCodecFile,
+} from '../types';
 import type { MediaMetadata } from '@/types/storage';
 import { mediaLibraryService } from '../services/media-library-service';
 import { createLogger } from '@/shared/logging/logger';
@@ -40,10 +46,12 @@ export const useMediaLibraryStore = create<
       errorLink: null,
       notification: null,
       selectedMediaIds: [],
+      selectedCompositionIds: [],
       searchQuery: '',
       filterByType: null,
       sortBy: 'date',
       viewMode: 'grid',
+      mediaItemSize: 1,
 
       // Broken media tracking (lazy detection)
       brokenMediaIds: [],
@@ -81,6 +89,7 @@ export const useMediaLibraryStore = create<
           mediaItems: [],
           mediaById: {},
           selectedMediaIds: [],
+          selectedCompositionIds: [],
           isLoading: !!projectId, // Set loading if switching to a project
           proxyStatus: new Map(),
           proxyProgress: new Map(),
@@ -206,7 +215,14 @@ export const useMediaLibraryStore = create<
       ...createRelinkingActions(set, get),
 
       // Selection management
+      setSelection: ({ mediaIds, compositionIds }) => set({
+        selectedMediaIds: mediaIds,
+        selectedCompositionIds: compositionIds,
+      }),
+
       selectMedia: (ids) => set({ selectedMediaIds: ids }),
+
+      selectCompositions: (ids) => set({ selectedCompositionIds: ids }),
 
       toggleMediaSelection: (id) =>
         set((state) => ({
@@ -215,13 +231,21 @@ export const useMediaLibraryStore = create<
             : [...state.selectedMediaIds, id],
         })),
 
-      clearSelection: () => set({ selectedMediaIds: [] }),
+      toggleCompositionSelection: (id) =>
+        set((state) => ({
+          selectedCompositionIds: state.selectedCompositionIds.includes(id)
+            ? state.selectedCompositionIds.filter((selectedId) => selectedId !== id)
+            : [...state.selectedCompositionIds, id],
+        })),
+
+      clearSelection: () => set({ selectedMediaIds: [], selectedCompositionIds: [] }),
 
       // Filters and search
       setSearchQuery: (query) => set({ searchQuery: query }),
       setFilterByType: (type) => set({ filterByType: type }),
       setSortBy: (sortBy) => set({ sortBy }),
       setViewMode: (viewMode) => set({ viewMode }),
+      setMediaItemSize: (size) => set({ mediaItemSize: Math.max(1, Math.min(5, size)) }),
 
       // Utility actions
       clearError: () => set({ error: null, errorLink: null }),

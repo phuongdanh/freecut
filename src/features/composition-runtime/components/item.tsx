@@ -1,7 +1,7 @@
 import React from 'react';
 import { AbsoluteFill } from '@/features/composition-runtime/deps/player';
 import { useDebugStore } from '@/features/composition-runtime/deps/stores';
-import type { TimelineItem, ShapeItem } from '@/types/timeline';
+import type { AudioItem, TimelineItem, ShapeItem } from '@/types/timeline';
 import type { TransformProperties } from '@/types/transform';
 import { DebugOverlay } from './debug-overlay';
 import { PitchCorrectedAudio } from './pitch-corrected-audio';
@@ -12,6 +12,7 @@ import { ShapeContent } from './shape-content';
 import { VideoContent } from './video-content';
 import { CompositionContent } from './composition-content';
 import { useVideoConfig } from '../hooks/use-player-compat';
+import { getSourceDimensions } from '../utils/transform-resolver';
 import {
   timelineToSourceFrames,
   sourceToTimelineFrames,
@@ -24,7 +25,7 @@ import { isGifUrl, isWebpUrl } from '@/utils/media-utils';
 import { useMediaLibraryStore } from '@/features/composition-runtime/deps/stores';
 import { createLogger } from '@/shared/logging/logger';
 
-const logger = createLogger('CompositionItem');
+function getLogger() { return createLogger('CompositionItem'); }
 
 /** Mask information passed from composition to items */
 export interface MaskInfo {
@@ -33,16 +34,20 @@ export interface MaskInfo {
   trackOrder: number;
 }
 
-/** Max nesting depth for composition rendering to prevent infinite recursion */
-const MAX_RENDER_DEPTH = 2;
+/** Safety guard against corrupted circular composition graphs. */
+const MAX_RENDER_DEPTH = 16;
 
 interface ItemProps {
   item: TimelineItem;
   muted?: boolean;
+  visible?: boolean;
   /** Active masks that should clip this item's content */
   masks?: MaskInfo[];
   /** Current composition nesting depth (prevents infinite recursion) */
   renderDepth?: number;
+  compositionRenderMode?: 'full' | 'visual-only' | 'audio-only';
+  audioGainMultiplier?: number;
+  audioGainLiveItemIds?: string[];
 }
 
 /**
@@ -59,7 +64,7 @@ interface ItemProps {
  *
  * Memoized to prevent unnecessary re-renders when parent (MainComposition) updates.
  */
-export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], renderDepth = 0 }) => {
+export const Item = React.memo<ItemProps>(({ item, muted = false, visible = true, masks = [], renderDepth = 0, compositionRenderMode = 'full', audioGainMultiplier = 1, audioGainLiveItemIds }) => {
   // Use muted prop directly - MainComposition already passes track.muted
   // Avoiding store subscription here prevents re-render issues with @legacy-video/media Audio
 
@@ -71,6 +76,7 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
   );
 
   if (item.type === 'video') {
+    const mediaSource = getSourceDimensions(item);
     // Guard against missing src (media resolution failed)
     if (!item.src) {
       return (
@@ -119,7 +125,7 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
     const hasCorruptedMetadata = sourceDuration === 0 && effectiveSourceSegment === 0 && trimBefore > MAX_REASONABLE_FRAMES;
 
     if (hasCorruptedMetadata || isInvalidSeek) {
-      logger.error('Invalid source position detected:', {
+      getLogger().error('Invalid source position detected:', {
         itemId: item.id,
         sourceStart: item.sourceStart,
         trimBefore,
@@ -153,7 +159,7 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
         1,
         sourceToTimelineFrames(effectiveDuration, playbackRate, sourceFps, timelineFps)
       );
-      logger.warn('Clip duration exceeds source duration (graceful clamp):', {
+      getLogger().warn('Clip duration exceeds source duration (graceful clamp):', {
         itemId: item.id,
         sourceFramesNeeded,
         sourceDuration,
@@ -199,13 +205,40 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
     // Use new ItemVisualWrapper for consolidated state and fixed DOM structure
     // resolveTransform handles defaults (fit-to-canvas) when no explicit transform is set
     return (
-      <ItemVisualWrapper item={item} masks={masks}>
+      <ItemVisualWrapper
+        item={item}
+        masks={masks}
+        mediaContent={{
+          fitMode: 'contain',
+          sourceWidth: mediaSource?.width,
+          sourceHeight: mediaSource?.height,
+          crop: item.crop,
+        }}
+      >
         {videoContent}
       </ItemVisualWrapper>
     );
   }
 
   if (item.type === 'audio') {
+    if (item.compositionId) {
+      if (renderDepth >= MAX_RENDER_DEPTH) {
+        return null;
+      }
+
+      return (
+        <CompositionContent
+          item={item as AudioItem & { compositionId: string }}
+          parentMuted={muted}
+          parentVisible={visible}
+          renderDepth={renderDepth + 1}
+          renderMode="audio-only"
+          audioGainMultiplier={audioGainMultiplier}
+          audioGainLiveItemIds={audioGainLiveItemIds}
+        />
+      );
+    }
+
     // Guard against missing src (media resolution failed)
     if (!item.src) {
       return null; // Audio can fail silently
@@ -217,6 +250,10 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
     // Get playback rate from speed property
     const playbackRate = item.speed ?? DEFAULT_SPEED;
 
+    const trackVolumeDb = ('trackVolumeDb' in item && typeof item.trackVolumeDb === 'number')
+      ? item.trackVolumeDb
+      : 0;
+
     // Use PitchCorrectedAudio for pitch-preserved playback during preview
     // and toneFrequency correction during rendering
     return (
@@ -224,18 +261,25 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
         src={item.src}
         itemId={item.id}
         trimBefore={trimBefore}
-        volume={item.volume ?? 0}
+        volume={(item.volume ?? 0) + trackVolumeDb}
         playbackRate={playbackRate}
         sourceFps={sourceFps}
         muted={muted}
         durationInFrames={item.durationInFrames}
         audioFadeIn={item.audioFadeIn}
         audioFadeOut={item.audioFadeOut}
+        audioFadeInCurve={item.audioFadeInCurve}
+        audioFadeOutCurve={item.audioFadeOutCurve}
+        audioFadeInCurveX={item.audioFadeInCurveX}
+        audioFadeOutCurveX={item.audioFadeOutCurveX}
+        liveGainItemIds={audioGainLiveItemIds}
+        volumeMultiplier={audioGainMultiplier}
       />
     );
   }
 
   if (item.type === 'image') {
+    const mediaSource = getSourceDimensions(item);
     // Guard against missing src (media resolution failed)
     if (!item.src) {
       return (
@@ -259,7 +303,7 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
         <GifPlayer
           mediaId={item.mediaId}
           src={item.src}
-          fit="cover"
+          fit="fill"
           playbackRate={playbackRate}
           loopBehavior="loop"
           format={isAnimatedWebp ? 'webp' : 'gif'}
@@ -267,7 +311,16 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
       );
 
       return (
-        <ItemVisualWrapper item={item} masks={masks}>
+        <ItemVisualWrapper
+          item={item}
+          masks={masks}
+          mediaContent={{
+            fitMode: 'contain',
+            sourceWidth: mediaSource?.width,
+            sourceHeight: mediaSource?.height,
+            crop: item.crop,
+          }}
+        >
           {animatedContent}
         </ItemVisualWrapper>
       );
@@ -281,14 +334,23 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
         style={{
           width: '100%',
           height: '100%',
-          objectFit: 'contain'
+          objectFit: 'fill'
         }}
       />
     );
 
     // Use new ItemVisualWrapper for consolidated state and fixed DOM structure
     return (
-      <ItemVisualWrapper item={item} masks={masks}>
+      <ItemVisualWrapper
+        item={item}
+        masks={masks}
+        mediaContent={{
+          fitMode: 'contain',
+          sourceWidth: mediaSource?.width,
+          sourceHeight: mediaSource?.height,
+          crop: item.crop,
+        }}
+      >
         {imageContent}
       </ItemVisualWrapper>
     );
@@ -322,7 +384,15 @@ export const Item = React.memo<ItemProps>(({ item, muted = false, masks = [], re
     // Pass parent muted so muting the track silences all sub-comp audio
     return (
       <ItemVisualWrapper item={item} masks={masks}>
-        <CompositionContent item={item} parentMuted={muted} renderDepth={renderDepth + 1} />
+        <CompositionContent
+          item={item}
+          parentMuted={muted}
+          parentVisible={visible}
+          renderDepth={renderDepth + 1}
+          renderMode={compositionRenderMode}
+          audioGainMultiplier={audioGainMultiplier}
+          audioGainLiveItemIds={audioGainLiveItemIds}
+        />
       </ItemVisualWrapper>
     );
   }

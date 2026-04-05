@@ -1,5 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { TimelineItem } from '@/types/timeline';
+import { usePlaybackStore } from '@/shared/state/playback';
+import { useEditorStore } from '@/shared/state/editor';
 import { toast } from 'sonner';
 import type { SnapTarget } from '../types/drag';
 import { useTimelineStore } from '../stores/timeline-store';
@@ -10,9 +12,30 @@ import { clampTrimAmount, clampToAdjacentItems, type TrimHandle } from '../utils
 import { useTransitionsStore } from '../stores/transitions-store';
 import { useRollingEditPreviewStore } from '../stores/rolling-edit-preview-store';
 import { useRippleEditPreviewStore } from '../stores/ripple-edit-preview-store';
-import { rollingTrimItems, rippleTrimItem } from '../stores/actions/item-actions';
-import { hasTransitionBridgeAtHandle } from '../utils/transition-edit-guards';
+import { useTransitionBreakPreviewStore } from '../stores/transition-break-preview-store';
+import { useLinkedEditPreviewStore } from '../stores/linked-edit-preview-store';
+import {
+  rollingTrimItems,
+  rippleTrimItem,
+  trimItemBreakingTransition,
+} from '../stores/actions/item-actions';
 import { findHandleNeighborWithTransitions } from '../utils/transition-linked-neighbors';
+import {
+  buildSynchronizedLinkedMoveUpdates,
+  getSynchronizedLinkedCounterpartPair,
+  getSynchronizedLinkedItems,
+} from '../utils/linked-items';
+import {
+  applyMovePreview,
+  applyTrimEndPreview,
+  applyTrimStartPreview,
+  type PreviewItemUpdate,
+} from '../utils/item-edit-preview';
+import {
+  clampRippleTrimDeltaToPreserveTransition,
+  clampRollingTrimDeltaToPreserveTransition,
+} from '../utils/transition-utils';
+import { getTransitionBridgeAtHandle } from '../utils/transition-edit-guards';
 
 interface TrimState {
   isTrimming: boolean;
@@ -24,6 +47,10 @@ interface TrimState {
   isRollingEdit: boolean;
   isRippleEdit: boolean;
   neighborId: string | null;
+  forcedMode: 'rolling' | 'ripple' | null;
+  isConstrained: boolean;
+  constraintLabel: string | null;
+  destroyTransitionAtHandle: boolean;
 }
 
 /**
@@ -65,6 +92,10 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
     isRollingEdit: false,
     isRippleEdit: false,
     neighborId: null,
+    forcedMode: null,
+    isConstrained: false,
+    constraintLabel: null,
+    destroyTransitionAtHandle: false,
   });
 
   const trimStateRef = useRef(trimState);
@@ -129,12 +160,11 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
       const { handle, initialFrom, initialDuration } = trimStateRef.current;
 
       // Detect edit modes.
-      // Explicit tool selection takes precedence over modifier keys.
-      const activeTool = useSelectionStore.getState().activeTool;
-      const explicitRolling = activeTool === 'rolling-edit';
-      const explicitRipple = activeTool === 'ripple-edit';
-      const isRollingEdit = explicitRolling || (!explicitRipple && altKeyRef.current && !shiftKeyRef.current);
-      const isRippleEdit = explicitRipple || (!explicitRolling && shiftKeyRef.current);
+      const forcedMode = trimStateRef.current.forcedMode;
+      const isRollingEdit = forcedMode === 'rolling'
+        || (forcedMode === null && altKeyRef.current && !shiftKeyRef.current);
+      const isRippleEdit = forcedMode === 'ripple'
+        || (forcedMode === null && shiftKeyRef.current);
       const allItems = useTimelineStore.getState().items;
       const transitions = useTransitionsStore.getState().transitions;
       const currentItem = getItemFromStore();
@@ -212,23 +242,36 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
 
       // Apply source boundary clamping for media items
       // This ensures visual feedback matches what the store will actually commit
+      let isConstrained = false;
+      let constraintLabel: string | null = null;
       const { clampedAmount } = clampTrimAmount(currentItem, handle!, deltaFrames, fps);
+      if (clampedAmount !== deltaFrames) {
+        isConstrained = true;
+        constraintLabel = 'no handle';
+      }
       deltaFrames = clampedAmount;
 
       // Clamp to adjacent items on the same track (allow overlap with transition-linked clips)
       // During ripple edit, skip adjacency clamping — downstream clips shift with the trim.
       if (!isRippleEdit) {
         const transitionLinkedIds = new Set<string>();
-        for (const t of transitions) {
-          if (t.leftClipId === currentItem.id) transitionLinkedIds.add(t.rightClipId);
-          if (t.rightClipId === currentItem.id) transitionLinkedIds.add(t.leftClipId);
+        if (!trimStateRef.current.destroyTransitionAtHandle) {
+          for (const t of transitions) {
+            if (t.leftClipId === currentItem.id) transitionLinkedIds.add(t.rightClipId);
+            if (t.rightClipId === currentItem.id) transitionLinkedIds.add(t.leftClipId);
+          }
         }
         // During rolling edit, exclude the neighbor from adjacency constraints —
         // it moves with the edit point, so the rolling edit clamp below handles it.
         if (isRollingEdit && neighborId) {
           transitionLinkedIds.add(neighborId);
         }
-        deltaFrames = clampToAdjacentItems(currentItem, handle!, deltaFrames, allItems, transitionLinkedIds);
+        const adjacentClamped = clampToAdjacentItems(currentItem, handle!, deltaFrames, allItems, transitionLinkedIds);
+        if (adjacentClamped !== deltaFrames) {
+          isConstrained = true;
+          constraintLabel = 'neighbor limit';
+        }
+        deltaFrames = adjacentClamped;
       }
 
       // Rolling edit: clamp to both clips' source limits
@@ -239,6 +282,8 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
           const { clampedAmount: neighborClamped } = clampTrimAmount(neighbor, 'start', deltaFrames, fps);
           // Use tighter constraint of both clips
           if (Math.abs(neighborClamped) < Math.abs(deltaFrames)) {
+            isConstrained = true;
+            constraintLabel = 'cut limit';
             deltaFrames = neighborClamped;
           }
         } else {
@@ -247,8 +292,49 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
           // delta < 0 (extend this item's start, edit point moves left) → neighbor shrinks end (negative for trimEnd = shrink)
           const { clampedAmount: neighborClamped } = clampTrimAmount(neighbor, 'end', deltaFrames, fps);
           if (Math.abs(neighborClamped) < Math.abs(deltaFrames)) {
+            isConstrained = true;
+            constraintLabel = 'cut limit';
             deltaFrames = neighborClamped;
           }
+        }
+
+        const transitionAtHandle = getTransitionBridgeAtHandle(transitions, currentItem.id, handle!);
+        const transitionClamped = clampRollingTrimDeltaToPreserveTransition(
+          currentItem,
+          handle!,
+          deltaFrames,
+          neighbor,
+          transitionAtHandle,
+          fps,
+        );
+        if (transitionClamped !== deltaFrames) {
+          isConstrained = true;
+          constraintLabel = 'transition limit';
+          deltaFrames = transitionClamped;
+        }
+      }
+
+      if (isRippleEdit && !trimStateRef.current.destroyTransitionAtHandle) {
+        const transitionAtHandle = getTransitionBridgeAtHandle(transitions, currentItem.id, handle!);
+        const neighborAtHandle = transitionAtHandle
+          ? allItems.find((candidate) => (
+              handle === 'end'
+                ? candidate.id === transitionAtHandle.rightClipId
+                : candidate.id === transitionAtHandle.leftClipId
+            )) ?? null
+          : null;
+        const transitionClamped = clampRippleTrimDeltaToPreserveTransition(
+          currentItem,
+          handle!,
+          deltaFrames,
+          neighborAtHandle,
+          transitionAtHandle,
+          fps,
+        );
+        if (transitionClamped !== deltaFrames) {
+          isConstrained = true;
+          constraintLabel = 'transition limit';
+          deltaFrames = transitionClamped;
         }
       }
 
@@ -265,9 +351,10 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
             neighborItemId: neighborId,
             handle: handle!,
             neighborDelta: deltaFrames,
+            constrained: isConstrained,
           });
-        } else if (previewStore.neighborDelta !== deltaFrames) {
-          previewStore.setNeighborDelta(deltaFrames);
+        } else if (previewStore.neighborDelta !== deltaFrames || previewStore.constrained !== isConstrained) {
+          previewStore.setNeighborDelta(deltaFrames, isConstrained);
         }
       } else {
         // Clear preview when Alt is released or no neighbor found
@@ -332,18 +419,131 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
         }
       }
 
+      if (trimStateRef.current.destroyTransitionAtHandle && handle) {
+        const transitionBreakStore = useTransitionBreakPreviewStore.getState();
+        if (
+          transitionBreakStore.itemId !== item.id
+          || transitionBreakStore.handle !== handle
+        ) {
+          transitionBreakStore.setPreview({
+            itemId: item.id,
+            handle,
+            delta: deltaFrames,
+          });
+        } else if (transitionBreakStore.delta !== deltaFrames) {
+          transitionBreakStore.setDelta(deltaFrames);
+        }
+      } else {
+        const transitionBreakStore = useTransitionBreakPreviewStore.getState();
+        if (transitionBreakStore.itemId) {
+          transitionBreakStore.clearPreview();
+        }
+      }
+
       // Update local state for visual feedback
       const isRolling = isRollingEdit && neighborId !== null;
+      const linkedPreviewUpdates: PreviewItemUpdate[] = [];
+      const linkedSelectionEnabled = useEditorStore.getState().linkedSelectionEnabled;
+
+      if (isRolling && neighborId) {
+        const counterpartPair = linkedSelectionEnabled
+          ? (handle === 'end'
+            ? getSynchronizedLinkedCounterpartPair(allItems, currentItem.id, neighborId)
+            : getSynchronizedLinkedCounterpartPair(allItems, neighborId, currentItem.id))
+          : null;
+
+        if (counterpartPair) {
+          linkedPreviewUpdates.push(
+            applyTrimEndPreview(counterpartPair.leftCounterpart, deltaFrames, fps),
+            applyTrimStartPreview(counterpartPair.rightCounterpart, deltaFrames, fps),
+          );
+        }
+      } else if (isRippleEdit) {
+        const synchronizedItems = linkedSelectionEnabled
+          ? getSynchronizedLinkedItems(allItems, currentItem.id)
+          : [currentItem];
+        const linkedCompanions = synchronizedItems.filter((linkedItem) => linkedItem.id !== currentItem.id);
+
+        for (const linkedItem of linkedCompanions) {
+          if (handle === 'end') {
+            linkedPreviewUpdates.push(applyTrimEndPreview(linkedItem, deltaFrames, fps));
+          } else {
+            linkedPreviewUpdates.push({
+              ...applyTrimStartPreview(linkedItem, deltaFrames, fps),
+              from: linkedItem.from,
+            });
+          }
+        }
+
+        const rippleShift = handle === 'end' ? deltaFrames : -deltaFrames;
+        if (rippleShift !== 0 && synchronizedItems.length > 1) {
+          const synchronizedIds = new Set(synchronizedItems.map((linkedItem) => linkedItem.id));
+          const oldById = new Map(synchronizedItems.map((linkedItem) => [linkedItem.id, linkedItem]));
+          const baseDeltaByItemId = new Map<string, number>();
+
+          for (const synchronizedItem of synchronizedItems) {
+            const synchronizedOld = oldById.get(synchronizedItem.id);
+            if (!synchronizedOld) continue;
+
+            const synchronizedOldEnd = synchronizedOld.from + synchronizedOld.durationInFrames;
+            const transitionNeighborIds = new Set<string>();
+            for (const transition of transitions) {
+              if (transition.leftClipId === synchronizedItem.id) {
+                transitionNeighborIds.add(transition.rightClipId);
+              }
+            }
+
+            for (const candidate of allItems) {
+              if (synchronizedIds.has(candidate.id)) continue;
+              if (candidate.trackId !== synchronizedOld.trackId) continue;
+              if (candidate.from >= synchronizedOldEnd || transitionNeighborIds.has(candidate.id)) {
+                baseDeltaByItemId.set(candidate.id, rippleShift);
+              }
+            }
+          }
+
+          linkedPreviewUpdates.push(
+            ...buildSynchronizedLinkedMoveUpdates(allItems, baseDeltaByItemId)
+              // Same-track downstream clips already get their live ripple shift from
+              // `useRippleEditPreviewStore`; duplicating that here moves them twice,
+              // which creates the temporary gap/ghost before mouseup snaps back.
+              .filter((update) => allItems.find((candidate) => candidate.id === update.id)?.trackId !== currentItem.trackId)
+              .map((update) => applyMovePreview(
+                allItems.find((candidate) => candidate.id === update.id)!,
+                update.from - (allItems.find((candidate) => candidate.id === update.id)?.from ?? update.from),
+              )),
+          );
+        }
+      } else {
+        const synchronizedItems = linkedSelectionEnabled
+          ? getSynchronizedLinkedItems(allItems, currentItem.id)
+          : [currentItem];
+        for (const linkedItem of synchronizedItems) {
+          if (linkedItem.id === currentItem.id) continue;
+          linkedPreviewUpdates.push(
+            handle === 'end'
+              ? applyTrimEndPreview(linkedItem, deltaFrames, fps)
+              : applyTrimStartPreview(linkedItem, deltaFrames, fps),
+          );
+        }
+      }
+
+      useLinkedEditPreviewStore.getState().setUpdates(linkedPreviewUpdates);
+
       if (deltaFrames !== trimStateRef.current.currentDelta ||
           isRolling !== trimStateRef.current.isRollingEdit ||
           isRippleEdit !== trimStateRef.current.isRippleEdit ||
-          neighborId !== trimStateRef.current.neighborId) {
+          neighborId !== trimStateRef.current.neighborId ||
+          isConstrained !== trimStateRef.current.isConstrained ||
+          constraintLabel !== trimStateRef.current.constraintLabel) {
         setTrimState(prev => ({
           ...prev,
           currentDelta: deltaFrames,
           isRollingEdit: isRolling,
           isRippleEdit,
           neighborId: neighborId,
+          isConstrained,
+          constraintLabel,
         }));
       }
 
@@ -370,12 +570,24 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
   // Mouse up handler - commits changes to store (single update)
   const handleMouseUp = useCallback(() => {
     if (trimStateRef.current.isTrimming) {
-      const deltaFrames = trimStateRef.current.currentDelta;
       const state = trimStateRef.current;
+      const deltaFrames = trimStateRef.current.currentDelta;
 
       // Only update store if there was actual change
       if (deltaFrames !== 0) {
-        if (state.isRippleEdit) {
+        const transitionIdsToRemove = state.destroyTransitionAtHandle && state.handle
+          ? useTransitionsStore.getState().transitions
+              .filter((transition) => (
+                state.handle === 'start'
+                  ? transition.rightClipId === item.id
+                  : transition.leftClipId === item.id
+              ))
+              .map((transition) => transition.id)
+          : [];
+
+        if (state.destroyTransitionAtHandle && state.handle) {
+          trimItemBreakingTransition(item.id, state.handle, deltaFrames, transitionIdsToRemove);
+        } else if (state.isRippleEdit) {
           // Ripple edit: trim + shift downstream items
           rippleTrimItem(item.id, state.handle!, deltaFrames);
         } else if (state.isRollingEdit && state.neighborId) {
@@ -403,6 +615,8 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
 
       // Clear ripple edit preview
       useRippleEditPreviewStore.getState().clearPreview();
+      useTransitionBreakPreviewStore.getState().clearPreview();
+      useLinkedEditPreviewStore.getState().clear();
 
       // Clear drag state (including snap indicator)
       setDragState(null);
@@ -422,6 +636,10 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
         isRollingEdit: false,
         isRippleEdit: false,
         neighborId: null,
+        forcedMode: null,
+        isConstrained: false,
+        constraintLabel: null,
+        destroyTransitionAtHandle: false,
       });
     }
   }, [item.id, trimItemStart, trimItemEnd, setDragState]);
@@ -453,13 +671,19 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
         window.removeEventListener('mouseup', handleMouseUp);
         window.removeEventListener('keydown', handleKeyDown);
         window.removeEventListener('keyup', handleKeyUp);
+        useRollingEditPreviewStore.getState().clearPreview();
+        useTransitionBreakPreviewStore.getState().clearPreview();
+        useLinkedEditPreviewStore.getState().clear();
       };
     }
   }, [trimState.isTrimming, handleMouseMove, handleMouseUp]);
 
   // Start trim drag
   const handleTrimStart = useCallback(
-    (e: React.MouseEvent, handle: TrimHandle) => {
+    (e: React.MouseEvent, handle: TrimHandle, options?: {
+      forcedMode?: 'rolling' | 'ripple' | null;
+      destroyTransitionAtHandle?: boolean;
+    }) => {
       // Only respond to left mouse button
       if (e.button !== 0) return;
       if (trackLocked) return;
@@ -468,18 +692,18 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
       // including guardrail early returns.
       e.stopPropagation();
       e.preventDefault();
+      usePlaybackStore.getState().setPreviewFrame(null);
 
-      const activeTool = useSelectionStore.getState().activeTool;
-      const explicitRolling = activeTool === 'rolling-edit';
-      const explicitRipple = activeTool === 'ripple-edit';
-      const modifierRolling = !explicitRipple && e.altKey && !e.shiftKey;
-      const modifierRipple = !explicitRolling && e.shiftKey;
+      const forcedMode = options?.forcedMode ?? null;
+      const destroyTransitionAtHandle = options?.destroyTransitionAtHandle ?? false;
+      const modifierRolling = e.altKey && !e.shiftKey;
+      const modifierRipple = e.shiftKey;
 
-      const wantsRolling = explicitRolling || modifierRolling;
-      const wantsRipple = explicitRipple || modifierRipple;
-
+      const wantsRolling = forcedMode === 'rolling' || (forcedMode === null && modifierRolling);
+      const wantsRipple = forcedMode === 'ripple' || (forcedMode === null && modifierRipple);
       const currentItem = getItemFromStore();
       const transitions = useTransitionsStore.getState().transitions;
+      let neighborId: string | null = null;
 
       if (wantsRolling) {
         const neighbor = findHandleNeighborWithTransitions(
@@ -488,19 +712,19 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
           useTimelineStore.getState().items,
           transitions,
         );
-        const neighborId = neighbor?.id ?? null;
+        neighborId = neighbor?.id ?? null;
         if (!neighborId) {
           toast.warning('Rolling edit needs a neighbor on this edge');
           return;
         }
       }
 
-      if (wantsRipple && hasTransitionBridgeAtHandle(transitions, currentItem.id, handle)) {
-        toast.warning('Ripple edit is blocked on transition edges', {
-          description: 'Remove the transition bridge or edit the opposite edge.',
-        });
-        return;
-      }
+      setDragState({
+        isDragging: true,
+        draggedItemIds: [item.id],
+        offset: { x: 0, y: 0 },
+        activeSnapTarget: null,
+      });
 
       setTrimState({
         isTrimming: true,
@@ -509,10 +733,33 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
         initialFrom: item.from,
         initialDuration: item.durationInFrames,
         currentDelta: 0,
-        isRollingEdit: false,
-        isRippleEdit: false,
-        neighborId: null,
+        isRollingEdit: wantsRolling,
+        isRippleEdit: wantsRipple,
+        neighborId,
+        forcedMode,
+        isConstrained: false,
+        constraintLabel: null,
+        destroyTransitionAtHandle,
       });
+
+      if (wantsRolling && neighborId) {
+        useRollingEditPreviewStore.getState().setPreview({
+          trimmedItemId: item.id,
+          neighborItemId: neighborId,
+          handle,
+          neighborDelta: 0,
+        });
+      }
+
+      if (destroyTransitionAtHandle) {
+        useTransitionBreakPreviewStore.getState().setPreview({
+          itemId: item.id,
+          handle,
+          delta: 0,
+        });
+      } else {
+        useTransitionBreakPreviewStore.getState().clearPreview();
+      }
     },
     [item.from, item.durationInFrames, trackLocked, getItemFromStore]
   );
@@ -523,6 +770,8 @@ export function useTimelineTrim(item: TimelineItem, timelineDuration: number, tr
     trimDelta: trimState.currentDelta,
     isRollingEdit: trimState.isRollingEdit,
     isRippleEdit: trimState.isRippleEdit,
+    trimConstrained: trimState.isConstrained,
+    trimConstraintLabel: trimState.constraintLabel,
     handleTrimStart,
   };
 }

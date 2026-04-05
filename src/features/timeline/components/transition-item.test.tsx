@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Transition } from '@/types/transition';
 import type { VideoItem } from '@/types/timeline';
@@ -9,6 +9,7 @@ import { useZoomStore } from '../stores/zoom-store';
 import { useRollingEditPreviewStore } from '../stores/rolling-edit-preview-store';
 import { useRippleEditPreviewStore } from '../stores/ripple-edit-preview-store';
 import { useSlideEditPreviewStore } from '../stores/slide-edit-preview-store';
+import { useTransitionBreakPreviewStore } from '../stores/transition-break-preview-store';
 import { TransitionItem } from './transition-item';
 
 function makeVideoItem(overrides: Partial<VideoItem> = {}): VideoItem {
@@ -46,6 +47,7 @@ describe('TransitionItem preview bridge motion', () => {
     useRollingEditPreviewStore.getState().clearPreview();
     useSlideEditPreviewStore.getState().clearPreview();
     useRippleEditPreviewStore.getState().clearPreview();
+    useTransitionBreakPreviewStore.getState().clearPreview();
   });
 
   it('updates bridge position in realtime while slide preview delta changes', () => {
@@ -95,7 +97,7 @@ describe('TransitionItem preview bridge motion', () => {
     expect(updatedLeftPx - initialLeftPx).toBe(-20);
   });
 
-  it('fills the full lane height when the separator is rendered outside the row', () => {
+  it('keeps the bridge inside the full clip body below the title bar', () => {
     const left = makeVideoItem({ id: 'left', from: 100, durationInFrames: 60 });
     const right = makeVideoItem({ id: 'right', from: 140, durationInFrames: 80, mediaId: 'media-2' });
     useItemsStore.getState().setItems([left, right]);
@@ -104,7 +106,71 @@ describe('TransitionItem preview bridge motion', () => {
 
     const overlay = screen.getByTitle('Fade (0.7s)');
     expect(overlay.className).toContain('inset-y-0');
-    expect(overlay.style.top).toBe('');
-    expect(overlay.style.bottom).toBe('');
+    expect(overlay.style.top).toBe('calc(var(--editor-timeline-clip-label-row-height) + 1px)');
+    expect(overlay.style.bottom).toBe('1px');
+  });
+
+  it('keeps a minimum-width bridge inside the previewed right clip during slide on a speed-adjusted segment', () => {
+    const slideTransition: Transition = {
+      ...transition,
+      durationInFrames: 4,
+      leftClipId: 'middle',
+      rightClipId: 'right',
+    };
+    const middle = makeVideoItem({ id: 'middle', from: 100, durationInFrames: 60, speed: 1.23 });
+    const right = makeVideoItem({ id: 'right', from: 160, durationInFrames: 12, mediaId: 'media-2', speed: 1.23 });
+    useItemsStore.getState().setItems([middle, right]);
+
+    render(<TransitionItem transition={slideTransition} />);
+
+    act(() => {
+      useSlideEditPreviewStore.getState().setPreview({
+        itemId: 'middle',
+        trackId: 'track-1',
+        leftNeighborId: null,
+        rightNeighborId: 'right',
+        slideDelta: 8,
+      });
+    });
+
+    const overlay = screen.getByTitle('Fade (0.1s)');
+    const rightEdge = parseFloat(overlay.style.left) + parseFloat(overlay.style.width);
+    const previewedRightClipEnd = ((right.from + right.durationInFrames) / 30) * 100;
+
+    expect(rightEdge).toBeLessThanOrEqual(Math.round(previewedRightClipEnd));
+  });
+
+  it('selects the transition when an edge handle is clicked', () => {
+    const left = makeVideoItem({ id: 'left', from: 100, durationInFrames: 60 });
+    const right = makeVideoItem({ id: 'right', from: 140, durationInFrames: 80, mediaId: 'media-2' });
+    useItemsStore.getState().setItems([left, right]);
+
+    const { container } = render(<TransitionItem transition={transition} />);
+    const handle = container.querySelector('[data-transition-hit-zone="left-edge"]');
+    expect(handle).not.toBeNull();
+
+    fireEvent.mouseDown(handle!, { button: 0, clientX: 10 });
+    fireEvent.mouseUp(document, { clientX: 10 });
+
+    expect(useSelectionStore.getState().selectedTransitionId).toBe('tr-1');
+  });
+
+  it('hides the bridge while previewing a trim that breaks the transition', () => {
+    const left = makeVideoItem({ id: 'left', from: 100, durationInFrames: 60 });
+    const right = makeVideoItem({ id: 'right', from: 140, durationInFrames: 80, mediaId: 'media-2' });
+    useItemsStore.getState().setItems([left, right]);
+
+    render(<TransitionItem transition={transition} />);
+    expect(screen.getByTitle('Fade (0.7s)')).toBeInTheDocument();
+
+    act(() => {
+      useTransitionBreakPreviewStore.getState().setPreview({
+        itemId: 'left',
+        handle: 'end',
+        delta: -8,
+      });
+    });
+
+    expect(screen.queryByTitle('Fade (0.7s)')).toBeNull();
   });
 });

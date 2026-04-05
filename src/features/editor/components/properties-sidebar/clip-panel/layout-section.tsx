@@ -1,12 +1,12 @@
 import { useCallback, useMemo, memo } from 'react';
 import { Move, RotateCcw, Link2, Link2Off } from 'lucide-react';
-import { Separator } from '@/components/ui/separator';
+import { useShallow } from 'zustand/react/shallow';
 import { Button } from '@/components/ui/button';
 import type { TimelineItem } from '@/types/timeline';
 import type { TransformProperties, CanvasSettings } from '@/types/transform';
 import { useGizmoStore, useThrottledFrame } from '@/features/editor/deps/preview';
 import { useMediaLibraryStore } from '@/features/editor/deps/media-library';
-import { useTimelineStore } from '@/features/editor/deps/timeline-store';
+import { useKeyframesStore, useTimelineStore } from '@/features/editor/deps/timeline-store';
 import {
   resolveTransform,
   getSourceDimensions,
@@ -22,8 +22,6 @@ import {
   PropertyRow,
   NumberInput,
   SliderInput,
-  AlignmentButtons,
-  type AlignmentType,
 } from '../components';
 
 interface LayoutSectionProps {
@@ -46,7 +44,7 @@ type TransformValues = {
 };
 
 /**
- * Layout section - position, dimensions, rotation, alignment.
+ * Transform section - position, dimensions, and rotation.
  * Memoized to prevent re-renders when props haven't changed.
  */
 export const LayoutSection = memo(function LayoutSection({
@@ -57,12 +55,27 @@ export const LayoutSection = memo(function LayoutSection({
   onAspectLockToggle,
 }: LayoutSectionProps) {
   const itemIds = useMemo(() => items.map((item) => item.id), [items]);
+  const itemIdSet = useMemo(() => new Set(itemIds), [itemIds]);
+  const itemsById = useMemo(() => new Map(items.map((item) => [item.id, item])), [items]);
 
   // Get current playhead frame for keyframe animation (throttled to reduce re-renders)
   const currentFrame = useThrottledFrame();
 
-  // Get keyframes for all selected items
-  const allKeyframes = useTimelineStore((s) => s.keyframes);
+  const itemKeyframes = useKeyframesStore(
+    useShallow(
+      useCallback(
+        (s) => itemIds.map((itemId) => s.keyframesByItemId[itemId] ?? null),
+        [itemIds]
+      )
+    )
+  );
+  const keyframesByItemId = useMemo(() => {
+    const map = new Map<string, (typeof itemKeyframes)[number]>();
+    for (const [index, itemId] of itemIds.entries()) {
+      map.set(itemId, itemKeyframes[index] ?? null);
+    }
+    return map;
+  }, [itemIds, itemKeyframes]);
 
   // Gizmo store for live preview (both for properties panel and gizmo drag sync)
   const setTransformPreview = useGizmoStore((s) => s.setTransformPreview);
@@ -74,12 +87,12 @@ export const LayoutSection = memo(function LayoutSection({
   const gizmoPreview = useMemo(() => {
     if (!activeGizmo || !previewTransform) return null;
     // Check if the gizmo's active item is in our selection
-    if (!itemIds.includes(activeGizmo.itemId)) return null;
+    if (!itemIdSet.has(activeGizmo.itemId)) return null;
     return {
       itemId: activeGizmo.itemId,
       transform: previewTransform,
     };
-  }, [activeGizmo, previewTransform, itemIds]);
+  }, [activeGizmo, previewTransform, itemIdSet]);
 
   // Resolve transforms once for all items, applying keyframe animation and
   // gizmo preview overrides. Reused by mixed-value fields and align/distribute.
@@ -92,7 +105,7 @@ export const LayoutSection = memo(function LayoutSection({
         }
         const sourceDimensions = getSourceDimensions(item);
         const baseResolved = resolveTransform(item, canvas, sourceDimensions);
-        const itemKeyframes = allKeyframes.find((k) => k.itemId === item.id);
+        const itemKeyframes = keyframesByItemId.get(item.id) ?? undefined;
         if (!itemKeyframes) return baseResolved;
         const relativeFrame = currentFrame - item.from;
         return resolveAnimatedTransform(baseResolved, itemKeyframes, relativeFrame);
@@ -107,7 +120,7 @@ export const LayoutSection = memo(function LayoutSection({
       });
     }
     return resolved;
-  }, [items, canvas, gizmoPreview, allKeyframes, currentFrame]);
+  }, [items, canvas, gizmoPreview, keyframesByItemId, currentFrame]);
 
   // Memoize all transform values at once to avoid repeated iterations.
   const { x, y, width, height, rotation } = useMemo(() => {
@@ -155,13 +168,13 @@ export const LayoutSection = memo(function LayoutSection({
       property: 'x' | 'y' | 'width' | 'height' | 'rotation' | 'opacity',
       value: number
     ): AutoKeyframeOperation | null => {
-      const item = items.find((i) => i.id === itemId);
+      const item = itemsById.get(itemId);
       if (!item) return null;
 
-      const itemKeyframes = allKeyframes.find((k) => k.itemId === itemId);
+      const itemKeyframes = keyframesByItemId.get(itemId) ?? undefined;
       return getAutoKeyframeOp(item, itemKeyframes, property, value, currentFrame);
     },
-    [items, allKeyframes, currentFrame]
+    [currentFrame, itemsById, keyframesByItemId]
   );
 
   // Live preview for X position (during scrub)
@@ -481,108 +494,13 @@ export const LayoutSection = memo(function LayoutSection({
     });
   }, [items, onTransformChange, canvas]);
 
-  const handleAlign = useCallback(
-    (alignment: AlignmentType) => {
-      const tolerance = 0.5;
-      const nextTransforms = new Map<string, Partial<TransformProperties>>();
-      const entries = items
-        .map((item) => {
-          const resolved = resolvedTransformsByItem.get(item.id);
-          return resolved ? { itemId: item.id, ...resolved } : null;
-        })
-        .filter((entry): entry is {
-          itemId: string;
-          x: number;
-          y: number;
-          width: number;
-          height: number;
-          rotation: number;
-        } => entry !== null);
-
-      if (entries.length === 0) return;
-
-      if (alignment === 'distribute-h' || alignment === 'distribute-v') {
-        if (entries.length < 3) return;
-        const axis = alignment === 'distribute-h' ? 'x' : 'y';
-        const sorted = [...entries].sort((a, b) => a[axis] - b[axis]);
-        const first = sorted[0]!;
-        const last = sorted[sorted.length - 1]!;
-        const step = (last[axis] - first[axis]) / (sorted.length - 1);
-
-        for (let i = 1; i < sorted.length - 1; i++) {
-          const entry = sorted[i]!;
-          const target = first[axis] + (step * i);
-          if (Math.abs(target - entry[axis]) <= tolerance) continue;
-          if (axis === 'x') {
-            nextTransforms.set(entry.itemId, { x: target });
-          } else {
-            nextTransforms.set(entry.itemId, { y: target });
-          }
-        }
-      } else {
-        for (const entry of entries) {
-          let newX: number | undefined;
-          let newY: number | undefined;
-
-          switch (alignment) {
-            case 'left':
-              newX = -canvas.width / 2 + entry.width / 2;
-              break;
-            case 'center-h':
-              newX = 0;
-              break;
-            case 'right':
-              newX = canvas.width / 2 - entry.width / 2;
-              break;
-            case 'top':
-              newY = -canvas.height / 2 + entry.height / 2;
-              break;
-            case 'center-v':
-              newY = 0;
-              break;
-            case 'bottom':
-              newY = canvas.height / 2 - entry.height / 2;
-              break;
-            default:
-              break;
-          }
-
-          const updates: Partial<TransformProperties> = {};
-          if (newX !== undefined && Math.abs(newX - entry.x) > tolerance) {
-            updates.x = newX;
-          }
-          if (newY !== undefined && Math.abs(newY - entry.y) > tolerance) {
-            updates.y = newY;
-          }
-          if (Object.keys(updates).length > 0) {
-            nextTransforms.set(entry.itemId, updates);
-          }
-        }
-      }
-
-      if (nextTransforms.size === 0) return;
-      updateItemsTransformMap(nextTransforms, { operation: 'move' });
-    },
-    [items, resolvedTransformsByItem, canvas, updateItemsTransformMap]
-  );
-
   return (
-    <PropertySection title="Layout" icon={Move} defaultOpen={true}>
-      {/* Alignment buttons */}
-      <AlignmentButtons onAlign={handleAlign} />
-
-      <Separator className="my-2" />
-
+    <PropertySection title="Transform" icon={Move} defaultOpen={true}>
       {/* Position */}
       <PropertyRow label="Position">
         <div className="flex items-start gap-1 w-full">
           <div className="grid grid-cols-2 gap-1 flex-1">
             <div className="flex items-center gap-0.5">
-              <KeyframeToggle
-                itemIds={itemIds}
-                property="x"
-                currentValue={x === 'mixed' ? 0 : x}
-              />
               <NumberInput
                 value={x}
                 onChange={handleXChange}
@@ -592,13 +510,13 @@ export const LayoutSection = memo(function LayoutSection({
                 step={1}
                 className="flex-1"
               />
-            </div>
-            <div className="flex items-center gap-0.5">
               <KeyframeToggle
                 itemIds={itemIds}
-                property="y"
-                currentValue={y === 'mixed' ? 0 : y}
+                property="x"
+                currentValue={x === 'mixed' ? 0 : x}
               />
+            </div>
+            <div className="flex items-center gap-0.5">
               <NumberInput
                 value={y}
                 onChange={handleYChange}
@@ -607,6 +525,11 @@ export const LayoutSection = memo(function LayoutSection({
                 unit="px"
                 step={1}
                 className="flex-1"
+              />
+              <KeyframeToggle
+                itemIds={itemIds}
+                property="y"
+                currentValue={y === 'mixed' ? 0 : y}
               />
             </div>
           </div>
@@ -625,11 +548,6 @@ export const LayoutSection = memo(function LayoutSection({
       {/* Dimensions */}
       <PropertyRow label="Size">
         <div className="flex items-center gap-1 w-full">
-          <KeyframeToggle
-            itemIds={itemIds}
-            property="width"
-            currentValue={width === 'mixed' ? 100 : width}
-          />
           <NumberInput
             value={width}
             onChange={handleWidthChange}
@@ -640,6 +558,11 @@ export const LayoutSection = memo(function LayoutSection({
             max={7680}
             step={1}
             className="flex-1 min-w-0"
+          />
+          <KeyframeToggle
+            itemIds={itemIds}
+            property="width"
+            currentValue={width === 'mixed' ? 100 : width}
           />
           <Button
             variant="ghost"
@@ -654,11 +577,6 @@ export const LayoutSection = memo(function LayoutSection({
               <Link2Off className="w-3.5 h-3.5" />
             )}
           </Button>
-          <KeyframeToggle
-            itemIds={itemIds}
-            property="height"
-            currentValue={height === 'mixed' ? 100 : height}
-          />
           <NumberInput
             value={height}
             onChange={handleHeightChange}
@@ -669,6 +587,11 @@ export const LayoutSection = memo(function LayoutSection({
             max={7680}
             step={1}
             className="flex-1 min-w-0"
+          />
+          <KeyframeToggle
+            itemIds={itemIds}
+            property="height"
+            currentValue={height === 'mixed' ? 100 : height}
           />
           <Button
             variant="ghost"
@@ -685,11 +608,6 @@ export const LayoutSection = memo(function LayoutSection({
       {/* Rotation */}
       <PropertyRow label="Rotation">
         <div className="flex items-center gap-1 w-full">
-          <KeyframeToggle
-            itemIds={itemIds}
-            property="rotation"
-            currentValue={rotation === 'mixed' ? 0 : rotation}
-          />
           <SliderInput
             value={rotation}
             onChange={handleRotationChange}
@@ -699,6 +617,11 @@ export const LayoutSection = memo(function LayoutSection({
             step={1}
             unit="°"
             className="flex-1 min-w-0"
+          />
+          <KeyframeToggle
+            itemIds={itemIds}
+            property="rotation"
+            currentValue={rotation === 'mixed' ? 0 : rotation}
           />
           <Button
             variant="ghost"

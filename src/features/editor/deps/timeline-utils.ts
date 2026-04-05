@@ -4,8 +4,18 @@
  */
 
 export {
+  createDefaultAdjustmentItem,
+  createDefaultShapeItem,
+  createDefaultTextItem,
+  findCompatibleTrackForItemType,
   findNearestAvailableSpace,
+  getDefaultGeneratedLayerDurationInFrames,
+  getTrackKind,
+  resolveEffectiveTrackStates,
   areFramesAligned,
+  getMaxTransitionDurationForHandles,
+  resolveTransitionTargetFromSelection,
   timelineToSourceFrames,
   sourceToTimelineFrames,
+  linkItems,
 } from './timeline-contract';

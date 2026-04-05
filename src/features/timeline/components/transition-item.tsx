@@ -6,7 +6,14 @@ import { useItemsStore } from '../stores/items-store';
 import { useRollingEditPreviewStore } from '../stores/rolling-edit-preview-store';
 import { useRippleEditPreviewStore } from '../stores/ripple-edit-preview-store';
 import { useSlideEditPreviewStore } from '../stores/slide-edit-preview-store';
+import { useTransitionBreakPreviewStore } from '../stores/transition-break-preview-store';
+import { useTrackPushPreviewStore } from '../stores/track-push-preview-store';
 import { useSelectionStore } from '@/shared/state/selection';
+import {
+  TRANSITION_DRAG_MIME,
+  useTransitionDragStore,
+  type DraggedTransitionDescriptor,
+} from '@/shared/state/transition-drag';
 import { useTimelineZoomContext } from '../contexts/timeline-zoom-context';
 import { useTransitionResize } from '../hooks/use-transition-resize';
 import { dragOffsetRef } from '../hooks/use-timeline-drag';
@@ -19,11 +26,13 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { cn } from '@/shared/ui/cn';
+import { EDITOR_LAYOUT_CSS_VALUES } from '@/shared/ui/editor-layout';
 import { Trash2 } from 'lucide-react';
 import {
   applyPreviewGeometryToClip,
   getTransitionBridgeBounds,
 } from '../utils/transition-preview-geometry';
+import { useLinkedEditPreviewStore } from '../stores/linked-edit-preview-store';
 
 interface TransitionItemProps {
   transition: Transition;
@@ -33,12 +42,30 @@ interface TransitionItemProps {
 /**
  * Transition Item Component
  *
- * Renders a CapCut-style transition overlay between adjacent clips.
- * Shows the transition region spanning both clips (fade out from left, fade in to right).
- * Displays duration and transition type.
+ * Renders a cut-centered transition bridge overlay between adjacent clips.
+ * The clips keep their full visual width under the bridge, similar to DaVinci.
  */
-// Width in pixels for edge hover detection (resize handles)
-const EDGE_HOVER_ZONE = 6;
+const BRIDGE_SELECT_SIDE_INSET = 6;
+const CUT_PASS_THROUGH_ZONE = 24;
+
+function readDraggedTransitionDescriptor(event: React.DragEvent): DraggedTransitionDescriptor | null {
+  const cached = useTransitionDragStore.getState().draggedTransition;
+  if (cached) return cached;
+
+  const raw = event.dataTransfer.getData(TRANSITION_DRAG_MIME);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<DraggedTransitionDescriptor>;
+    if (typeof parsed.presentation !== 'string') return null;
+    return {
+      presentation: parsed.presentation,
+      direction: parsed.direction,
+    };
+  } catch {
+    return null;
+  }
+}
 
 export const TransitionItem = memo(function TransitionItem({
   transition,
@@ -48,6 +75,9 @@ export const TransitionItem = memo(function TransitionItem({
   const fps = useTimelineStore((s: TimelineState) => s.fps);
   const removeTransition = useTimelineStore(
     (s: TimelineActions) => s.removeTransition
+  );
+  const updateTransition = useTimelineStore(
+    (s: TimelineActions) => s.updateTransition
   );
 
   // Get the clips involved in this transition
@@ -70,7 +100,7 @@ export const TransitionItem = memo(function TransitionItem({
   );
 
   // Resize functionality
-  const { isResizing, resizeHandle, handleResizeStart, previewDuration } =
+  const { isResizing, handleResizeStart, previewDuration } =
     useTransitionResize(transition);
 
   // Rolling preview (only when this transition's clips are involved)
@@ -173,6 +203,56 @@ export const TransitionItem = memo(function TransitionItem({
     ),
   );
 
+  const isHiddenForBreakPreview = useTransitionBreakPreviewStore(
+    useCallback((s) => (
+      (s.itemId === transition.leftClipId && s.handle === 'end')
+      || (s.itemId === transition.rightClipId && s.handle === 'start')
+    ), [transition.leftClipId, transition.rightClipId])
+  );
+
+  // Linked edit preview (rate stretch ripple and other generic previews)
+  // Extract only the geometry fields the bridge needs, with useShallow to prevent
+  // re-renders when the store rebuilds objects with identical values.
+  const leftLinkedEditPreview = useLinkedEditPreviewStore(
+    useShallow(
+      useCallback((s) => {
+        const update = s.updatesById[transition.leftClipId];
+        if (!update) return null;
+        return { from: update.from, durationInFrames: update.durationInFrames };
+      }, [transition.leftClipId])
+    )
+  );
+  const rightLinkedEditPreview = useLinkedEditPreviewStore(
+    useShallow(
+      useCallback((s) => {
+        const update = s.updatesById[transition.rightClipId];
+        if (!update) return null;
+        return { from: update.from, durationInFrames: update.durationInFrames };
+      }, [transition.rightClipId])
+    )
+  );
+
+  // Track push preview: only subscribe to delta when this clip is shifted.
+  // Return undefined for non-shifted clips so they skip re-renders entirely.
+  const trackPushLeft = useTrackPushPreviewStore(
+    useShallow(
+      useCallback((s) => (
+        s.shiftedItemIds.has(transition.leftClipId)
+          ? { delta: s.delta, isShifted: true as const }
+          : undefined
+      ), [transition.leftClipId])
+    )
+  );
+  const trackPushRight = useTrackPushPreviewStore(
+    useShallow(
+      useCallback((s) => (
+        s.shiftedItemIds.has(transition.rightClipId)
+          ? { delta: s.delta, isShifted: true as const }
+          : undefined
+      ), [transition.rightClipId])
+    )
+  );
+
   // Track hovered edge for showing resize handles
   const [hoveredEdge, setHoveredEdge] = useState<'left' | 'right' | null>(null);
 
@@ -241,9 +321,11 @@ export const TransitionItem = memo(function TransitionItem({
           delta: ripplePreview.delta,
           isDownstream: ripplePreview.leftDownstream,
         },
+        linkedEdit: leftLinkedEditPreview,
+        trackPush: trackPushLeft,
       },
     );
-  }, [leftClip, rollingPreview, slidePreview, ripplePreview]);
+  }, [leftClip, rollingPreview, slidePreview, ripplePreview, leftLinkedEditPreview, trackPushLeft]);
 
   const effectiveRightClip = useMemo(() => {
     if (!rightClip) return null;
@@ -259,9 +341,11 @@ export const TransitionItem = memo(function TransitionItem({
           delta: ripplePreview.delta,
           isDownstream: ripplePreview.rightDownstream,
         },
+        linkedEdit: rightLinkedEditPreview,
+        trackPush: trackPushRight,
       },
     );
-  }, [rightClip, rollingPreview, slidePreview, ripplePreview]);
+  }, [rightClip, rollingPreview, slidePreview, ripplePreview, rightLinkedEditPreview, trackPushRight]);
 
   const position = useMemo(() => {
     if (!effectiveLeftClip || !effectiveRightClip) return null;
@@ -269,54 +353,48 @@ export const TransitionItem = memo(function TransitionItem({
     const bridge = getTransitionBridgeBounds(
       effectiveLeftClip.from,
       effectiveLeftClip.durationInFrames,
+      effectiveRightClip.from,
       previewDuration,
+      transition.alignment,
     );
     // Round each edge independently - same pixel grid as timeline items
     const bridgeRight = Math.round(frameToPixels(bridge.rightFrame));
     const bridgeLeft = Math.round(frameToPixels(bridge.leftFrame));
     const naturalWidth = bridgeRight - bridgeLeft;
+    const leftEnd = effectiveLeftClip.from + effectiveLeftClip.durationInFrames;
+    const leftClipStart = Math.round(frameToPixels(effectiveLeftClip.from));
+    const rightClipEnd = Math.round(frameToPixels(effectiveRightClip.from + effectiveRightClip.durationInFrames));
+    const cutFrame = Math.abs(leftEnd - effectiveRightClip.from) <= 1
+      ? effectiveRightClip.from
+      : leftEnd;
+    const cutPx = Math.round(frameToPixels(cutFrame));
 
     // Minimum width for visibility
     const minWidth = 32;
-    const effectiveWidth = Math.max(naturalWidth, minWidth);
-    // Center the minimum-width bridge on the overlap midpoint
-    const left = naturalWidth >= minWidth
+    const maxVisualWidth = Math.max(naturalWidth, rightClipEnd - leftClipStart);
+    const effectiveWidth = Math.min(Math.max(naturalWidth, minWidth), maxVisualWidth);
+    // Center the minimum-width bridge on the overlap midpoint, but keep all
+    // geometry snapped to integer pixels so the center cut line does not jitter.
+    const centeredLeft = naturalWidth >= effectiveWidth
       ? bridgeLeft
-      : bridgeLeft - (minWidth - naturalWidth) / 2;
+      : Math.round(((bridgeLeft + bridgeRight) / 2) - (effectiveWidth / 2));
+    const left = Math.min(Math.max(centeredLeft, leftClipStart), rightClipEnd - effectiveWidth);
 
-    return { left, width: effectiveWidth };
-  }, [effectiveLeftClip, effectiveRightClip, frameToPixels, previewDuration]);
+    return {
+      left,
+      width: effectiveWidth,
+      cutOffset: cutPx - left,
+    };
+  }, [effectiveLeftClip, effectiveRightClip, frameToPixels, previewDuration, transition.alignment]);
 
   // Duration in seconds for display (use previewDuration for visual feedback)
   const durationSec = useMemo(() => {
     return (previewDuration / fps).toFixed(1);
   }, [previewDuration, fps]);
-
-  // Handle mouse move to detect edge hover
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent) => {
-      if (isResizing) return;
-
-      const rect = e.currentTarget.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-
-      if (x < EDGE_HOVER_ZONE) {
-        setHoveredEdge('left');
-      } else if (x > rect.width - EDGE_HOVER_ZONE) {
-        setHoveredEdge('right');
-      } else {
-        setHoveredEdge(null);
-      }
-    },
-    [isResizing]
+  const draggedTransition = useTransitionDragStore((s) => s.draggedTransition);
+  const dragPreviewMatches = useTransitionDragStore(
+    useCallback((s) => s.preview?.existingTransitionId === transition.id, [transition.id])
   );
-
-  // Clear hover state when mouse leaves
-  const handleMouseLeave = useCallback(() => {
-    if (!isResizing) {
-      setHoveredEdge(null);
-    }
-  }, [isResizing]);
 
   // Handle click to select (only if not resizing)
   const handleClick = useCallback(
@@ -345,20 +423,69 @@ export const TransitionItem = memo(function TransitionItem({
     []
   );
 
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent, handle: 'left' | 'right') => {
+    selectTransition(transition.id);
+    handleResizeStart(e, handle);
+  }, [handleResizeStart, selectTransition, transition.id]);
+
   // Handle delete
   const handleDelete = useCallback(() => {
     removeTransition(transition.id);
   }, [transition.id, removeTransition]);
 
-  if (!position || !effectiveLeftClip || !effectiveRightClip) {
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    const dragDescriptor = readDraggedTransitionDescriptor(e);
+    if (!dragDescriptor || !draggedTransition) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    const dragState = useTransitionDragStore.getState();
+    dragState.setInvalidHint(null);
+    dragState.setPreview({
+      leftClipId: transition.leftClipId,
+      rightClipId: transition.rightClipId,
+      durationInFrames: transition.durationInFrames,
+      alignment: transition.alignment ?? 0.5,
+      existingTransitionId: transition.id,
+    });
+  }, [draggedTransition, transition]);
+
+  const handleDragLeave = useCallback(() => {
+    const dragState = useTransitionDragStore.getState();
+    if (dragState.preview?.existingTransitionId === transition.id) {
+      dragState.clearPreview();
+    }
+    dragState.setInvalidHint(null);
+  }, [transition.id]);
+
+  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    const dragDescriptor = readDraggedTransitionDescriptor(e);
+    if (!dragDescriptor) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    updateTransition(transition.id, {
+      presentation: dragDescriptor.presentation,
+      direction: dragDescriptor.direction,
+    });
+    useTransitionDragStore.getState().clearDrag();
+  }, [transition.id, updateTransition]);
+
+  if (!position || !effectiveLeftClip || !effectiveRightClip || isHiddenForBreakPreview) {
     return null;
   }
 
-  // Get presentation label
   const presentationLabel = transition.presentation?.charAt(0).toUpperCase() + transition.presentation?.slice(1) || 'Fade';
 
   // Determine cursor based on hover state
   const cursor = hoveredEdge ? 'ew-resize' : 'pointer';
+  const leftSelectWidth = Math.max(0, position.cutOffset - (CUT_PASS_THROUGH_ZONE / 2) - BRIDGE_SELECT_SIDE_INSET);
+  const rightSelectLeft = Math.min(
+    position.width - BRIDGE_SELECT_SIDE_INSET,
+    position.cutOffset + (CUT_PASS_THROUGH_ZONE / 2),
+  );
+  const rightSelectWidth = Math.max(0, position.width - BRIDGE_SELECT_SIDE_INSET - rightSelectLeft);
 
   return (
     <ContextMenu>
@@ -366,76 +493,89 @@ export const TransitionItem = memo(function TransitionItem({
         <div
           ref={containerRef}
           className={cn(
-            'absolute inset-y-0 overflow-hidden rounded-sm',
+            'absolute inset-y-0 overflow-visible rounded-sm pointer-events-none',
             isSelected &&
-              'ring-2 ring-inset ring-primary',
+              'ring-2 ring-inset ring-orange-400',
+            dragPreviewMatches && 'ring-2 ring-inset ring-amber-300',
             isResizing && 'ring-2 ring-inset ring-purple-400'
           )}
           style={{
             left: `${position.left}px`,
             width: `${position.width}px`,
+            top: `calc(${EDITOR_LAYOUT_CSS_VALUES.timelineClipLabelRowHeight} + 1px)`,
+            bottom: '1px',
             zIndex: isResizing ? 50 : 10,
             opacity: trackHidden ? 0.3 : undefined,
-            cursor,
+            cursor: isResizing ? 'ew-resize' : undefined,
           }}
-          onMouseDown={handleMouseDown}
-          onClick={handleClick}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={handleMouseLeave}
           title={`${presentationLabel} (${durationSec}s)`}
         >
-          {/* CapCut-style transition region overlay - more transparent */}
           <div
             className={cn(
-              'flex h-full w-full items-center justify-center gap-1 px-1.5',
-              'bg-gradient-to-r from-purple-500/22 via-purple-400/46 to-purple-500/22',
-              'border border-purple-400/35',
-              'shadow-[inset_0_1px_0_rgba(255,255,255,0.12),inset_0_-1px_0_rgba(255,255,255,0.06)]',
-              'hover:from-purple-500/28 hover:via-purple-400/54 hover:to-purple-500/28',
-              'hover:border-purple-400/50'
+              'pointer-events-none relative h-full w-full rounded-sm border bg-transparent',
+              isSelected
+                ? 'border-orange-400/90 shadow-[0_0_0_1px_rgba(251,146,60,0.18)]'
+                : 'border-slate-100/80 shadow-[0_0_0_1px_rgba(248,250,252,0.1)]'
             )}
           >
-            {/* Bowtie icon - hide when too small */}
-            {position.width >= 24 && (
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                className="w-3.5 h-3.5 flex-shrink-0"
-              >
-                <path d="M4 6 L12 12 L4 18 Z" fill="white" fillOpacity="0.7" />
-                <path d="M20 6 L12 12 L20 18 Z" fill="white" fillOpacity="0.7" />
-              </svg>
-            )}
-            {/* Duration label - only show if enough width */}
-            {position.width >= 50 && (
-              <span className="text-[10px] text-white/80 font-medium truncate">
-                {durationSec}s
-              </span>
-            )}
+            <div className="absolute inset-x-0 top-0 h-px bg-slate-50/70" />
+            <div className="absolute inset-x-0 bottom-0 h-px bg-slate-900/15" />
           </div>
 
-          {/* Left resize handle */}
+          {leftSelectWidth > 0 && (
+            <div
+              className="absolute inset-y-0 pointer-events-auto"
+              style={{
+                left: `${BRIDGE_SELECT_SIDE_INSET}px`,
+                width: `${leftSelectWidth}px`,
+                cursor: isResizing ? 'ew-resize' : cursor,
+              }}
+              onMouseDown={handleMouseDown}
+              onClick={handleClick}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            />
+          )}
+
+          {rightSelectWidth > 0 && (
+            <div
+              className="absolute inset-y-0 pointer-events-auto"
+              style={{
+                left: `${rightSelectLeft}px`,
+                width: `${rightSelectWidth}px`,
+                cursor: isResizing ? 'ew-resize' : cursor,
+              }}
+              onMouseDown={handleMouseDown}
+              onClick={handleClick}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+            />
+          )}
+
+          {/* Left resize handle (invisible hit zone, cursor-only feedback) */}
           <div
-            className={cn(
-              'absolute left-0 top-0 bottom-0 w-1.5 bg-purple-400 cursor-ew-resize rounded-l',
-              hoveredEdge === 'left' || (isResizing && resizeHandle === 'left')
-                ? 'opacity-100'
-                : 'opacity-0'
-            )}
-            onMouseDown={(e) => handleResizeStart(e, 'left')}
+            className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize rounded-l pointer-events-auto"
+            data-transition-hit-zone="left-edge"
+            onMouseEnter={() => setHoveredEdge('left')}
+            onMouseLeave={() => {
+              if (!isResizing) setHoveredEdge(null);
+            }}
+            onMouseDown={(e) => handleResizeMouseDown(e, 'left')}
             onMouseUp={stopEvent}
             onClick={stopEvent}
           />
 
-          {/* Right resize handle */}
+          {/* Right resize handle (invisible hit zone, cursor-only feedback) */}
           <div
-            className={cn(
-              'absolute right-0 top-0 bottom-0 w-1.5 bg-purple-400 cursor-ew-resize rounded-r',
-              hoveredEdge === 'right' || (isResizing && resizeHandle === 'right')
-                ? 'opacity-100'
-                : 'opacity-0'
-            )}
-            onMouseDown={(e) => handleResizeStart(e, 'right')}
+            className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize rounded-r pointer-events-auto"
+            data-transition-hit-zone="right-edge"
+            onMouseEnter={() => setHoveredEdge('right')}
+            onMouseLeave={() => {
+              if (!isResizing) setHoveredEdge(null);
+            }}
+            onMouseDown={(e) => handleResizeMouseDown(e, 'right')}
             onMouseUp={stopEvent}
             onClick={stopEvent}
           />

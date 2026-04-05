@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
-import { Slider } from '@/components/ui/slider';
 import { Separator } from '@/components/ui/separator';
 import {
   Play,
@@ -9,7 +8,6 @@ import {
   SkipForward,
   ChevronLeft,
   ChevronRight,
-  Volume2,
   Zap,
   Camera,
   Loader2,
@@ -24,11 +22,6 @@ interface PlaybackControlsProps {
   totalFrames: number;
   fps: number;
 }
-
-const PREVIEW_CONTROL_BUTTON_STYLE = {
-  height: EDITOR_LAYOUT_CSS_VALUES.previewControlButtonSize,
-  width: EDITOR_LAYOUT_CSS_VALUES.previewControlButtonSize,
-};
 
 async function canvasToBlob(
   canvas: OffscreenCanvas | HTMLCanvasElement,
@@ -93,6 +86,8 @@ function buildFrameFileName(frame: number, fps: number, totalFrames: number): st
  * - Frame capture
  * - Volume control
  */
+const btnSize = { width: EDITOR_LAYOUT_CSS_VALUES.toolbarButtonSize, height: EDITOR_LAYOUT_CSS_VALUES.toolbarButtonSize } as const;
+
 export function PlaybackControls({ totalFrames, fps }: PlaybackControlsProps) {
   const [isSavingFrame, setIsSavingFrame] = useState(false);
 
@@ -100,13 +95,11 @@ export function PlaybackControls({ totalFrames, fps }: PlaybackControlsProps) {
   // NOTE: Don't subscribe to currentFrame - only needed in click handlers
   // Read from store directly when needed to avoid re-renders every frame
   const isPlaying = usePlaybackStore((s) => s.isPlaying);
-  const volume = usePlaybackStore((s) => s.volume);
   const useProxy = usePlaybackStore((s) => s.useProxy);
   const togglePlayPause = usePlaybackStore((s) => s.togglePlayPause);
   const setCurrentFrame = usePlaybackStore((s) => s.setCurrentFrame);
   const setPreviewFrame = usePlaybackStore((s) => s.setPreviewFrame);
   const setDisplayedFrame = usePlaybackStore((s) => s.setDisplayedFrame);
-  const setVolume = usePlaybackStore((s) => s.setVolume);
   const toggleUseProxy = usePlaybackStore((s) => s.toggleUseProxy);
 
   // Note: Automatic playback loop is now handled by Composition Player
@@ -210,43 +203,43 @@ export function PlaybackControls({ totalFrames, fps }: PlaybackControlsProps) {
   return (
     <>
       {/* Transport Controls */}
-      <div className="flex items-center gap-1 flex-shrink-0">
+      <div className="flex items-center gap-0.5 flex-shrink-0">
         <Button
           variant="ghost"
           size="icon"
           className="flex-shrink-0"
-          style={PREVIEW_CONTROL_BUTTON_STYLE}
+          style={btnSize}
           onClick={handleGoToStart}
           data-tooltip="Go to Start (Home)"
           aria-label="Go to start"
         >
-          <SkipBack className="w-4 h-4" />
+          <SkipBack className="w-3.5 h-3.5" />
         </Button>
 
         <Button
           variant="ghost"
           size="icon"
           className="flex-shrink-0"
-          style={PREVIEW_CONTROL_BUTTON_STYLE}
+          style={btnSize}
           onClick={handlePreviousFrame}
           data-tooltip="Previous Frame (Left Arrow)"
           aria-label="Previous frame"
         >
-          <ChevronLeft className="w-4 h-4" />
+          <ChevronLeft className="w-3.5 h-3.5" />
         </Button>
 
         <Button
           size="icon"
-          className="glow-primary-sm flex-shrink-0"
-          style={PREVIEW_CONTROL_BUTTON_STYLE}
+          className="flex-shrink-0"
+          style={btnSize}
           onClick={togglePlayPause}
           data-tooltip={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
           aria-label={isPlaying ? 'Pause' : 'Play'}
         >
           {isPlaying ? (
-            <Pause className="w-5 h-5" />
+            <Pause className="w-3.5 h-3.5" />
           ) : (
-            <Play className="w-5 h-5 ml-0.5" />
+            <Play className="w-3.5 h-3.5 ml-0.5" />
           )}
         </Button>
 
@@ -254,97 +247,71 @@ export function PlaybackControls({ totalFrames, fps }: PlaybackControlsProps) {
           variant="ghost"
           size="icon"
           className="flex-shrink-0"
-          style={PREVIEW_CONTROL_BUTTON_STYLE}
+          style={btnSize}
           onClick={handleNextFrame}
           data-tooltip="Next Frame (Right Arrow)"
           aria-label="Next frame"
         >
-          <ChevronRight className="w-4 h-4" />
+          <ChevronRight className="w-3.5 h-3.5" />
         </Button>
 
         <Button
           variant="ghost"
           size="icon"
           className="flex-shrink-0"
-          style={PREVIEW_CONTROL_BUTTON_STYLE}
+          style={btnSize}
           onClick={handleGoToEnd}
           data-tooltip="Go to End (End)"
           aria-label="Go to end"
         >
-          <SkipForward className="w-4 h-4" />
+          <SkipForward className="w-3.5 h-3.5" />
         </Button>
       </div>
 
-      <Separator orientation="vertical" className="h-6 flex-shrink-0" />
+      {/* Save frame — hidden at narrow widths */}
+      <div className="hidden @min-[440px]:flex items-center gap-0.5 flex-shrink-0">
+        <Separator orientation="vertical" className="h-4 flex-shrink-0" />
 
-      <Button
-        variant="ghost"
-        size="icon"
-        className="flex-shrink-0"
-        style={PREVIEW_CONTROL_BUTTON_STYLE}
-        onClick={() => {
-          void handleSaveFrame();
-        }}
-        disabled={isSavingFrame}
-        data-tooltip={isSavingFrame ? 'Saving Frame...' : 'Save Frame'}
-        aria-label={isSavingFrame ? 'Saving frame' : 'Save frame'}
-      >
-        {isSavingFrame ? (
-          <Loader2 className="w-4 h-4 animate-spin" />
-        ) : (
-          <Camera className="w-4 h-4" />
-        )}
-      </Button>
-
-      <Separator orientation="vertical" className="h-6 flex-shrink-0" />
-
-      {/* Volume Control - shrinks and clips when panel is narrow */}
-      <div className="flex items-center gap-2 min-w-0 overflow-hidden flex-shrink">
         <Button
           variant="ghost"
           size="icon"
           className="flex-shrink-0"
-          style={PREVIEW_CONTROL_BUTTON_STYLE}
-          data-tooltip="Volume"
-          aria-label="Volume"
-        >
-          <Volume2 className="w-4 h-4" />
-        </Button>
-        <Slider
-          value={[volume * 100]}
-          onValueChange={(values) => setVolume((values[0] ?? 75) / 100)}
-          onValueCommit={() => {
-            if (document.activeElement instanceof HTMLElement) {
-              document.activeElement.blur();
-            }
+          style={btnSize}
+          onClick={() => {
+            void handleSaveFrame();
           }}
-          max={100}
-          step={1}
-          className="w-20 flex-shrink-0"
-          aria-label="Volume control"
-        />
-        <span className="text-[11px] text-muted-foreground font-mono w-7 flex-shrink-0">
-          {Math.round(volume * 100)}%
-        </span>
+          disabled={isSavingFrame}
+          data-tooltip={isSavingFrame ? 'Saving Frame...' : 'Save Frame'}
+          aria-label={isSavingFrame ? 'Saving frame' : 'Save frame'}
+        >
+          {isSavingFrame ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <Camera className="w-3.5 h-3.5" />
+          )}
+        </Button>
       </div>
 
-      <Separator orientation="vertical" className="h-6 flex-shrink-0" />
+      {/* Proxy toggle — hidden at narrow widths */}
+      <div className="hidden @min-[440px]:flex items-center gap-0.5 flex-shrink-0">
+        <Separator orientation="vertical" className="h-4 flex-shrink-0" />
 
-      <Button
-        variant="ghost"
-        size="icon"
-        className={`flex-shrink-0 ${
-          useProxy
-            ? 'text-green-500 hover:text-green-400 hover:bg-green-500/10'
-            : 'text-muted-foreground hover:text-foreground'
-        }`}
-        style={PREVIEW_CONTROL_BUTTON_STYLE}
-        onClick={toggleUseProxy}
-        data-tooltip={useProxy ? 'Proxy Playback: On' : 'Proxy Playback: Off'}
-        aria-label={useProxy ? 'Disable proxy playback' : 'Enable proxy playback'}
-      >
-        <Zap className="w-4 h-4" />
-      </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          style={btnSize}
+          className={`flex-shrink-0 ${
+            useProxy
+              ? 'text-green-500 hover:text-green-400 hover:bg-green-500/10'
+              : 'text-muted-foreground hover:text-foreground'
+          }`}
+          onClick={toggleUseProxy}
+          data-tooltip={useProxy ? 'Proxy Playback: On' : 'Proxy Playback: Off'}
+          aria-label={useProxy ? 'Disable proxy playback' : 'Enable proxy playback'}
+        >
+          <Zap className="w-3.5 h-3.5" />
+        </Button>
+      </div>
     </>
   );
 }

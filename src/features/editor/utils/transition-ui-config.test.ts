@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   TRANSITION_CATEGORY_ORDER,
-  TRANSITION_CATEGORY_START_INDICES,
-  TRANSITION_CONFIGS_BY_CATEGORY,
-  TRANSITION_PRESENTATION_CONFIGS,
+  getTransitionCategoryStartIndices,
+  getTransitionConfigsByCategory,
+  getTransitionPresentationConfigs,
 } from './transition-ui-config';
 
 function toConfigKey(config: { id: string; direction?: string }): string {
@@ -13,9 +13,9 @@ function toConfigKey(config: { id: string; direction?: string }): string {
 describe('transition-ui-config', () => {
   it('keeps flat config offsets aligned with grouped category ordering', () => {
     for (const category of TRANSITION_CATEGORY_ORDER) {
-      const groupedConfigs = TRANSITION_CONFIGS_BY_CATEGORY[category] ?? [];
-      const startIndex = TRANSITION_CATEGORY_START_INDICES[category] ?? 0;
-      const flatSlice = TRANSITION_PRESENTATION_CONFIGS.slice(
+      const groupedConfigs = getTransitionConfigsByCategory()[category] ?? [];
+      const startIndex = getTransitionCategoryStartIndices()[category] ?? 0;
+      const flatSlice = getTransitionPresentationConfigs().slice(
         startIndex,
         startIndex + groupedConfigs.length,
       );
@@ -25,13 +25,13 @@ describe('transition-ui-config', () => {
   });
 
   it('resolves the glitch card to the glitch transition config', () => {
-    const customConfigs = TRANSITION_CONFIGS_BY_CATEGORY.custom ?? [];
+    const customConfigs = getTransitionConfigsByCategory().custom ?? [];
     const glitchIndex = customConfigs.findIndex((config) => config.id === 'glitch');
 
     expect(glitchIndex).toBeGreaterThanOrEqual(0);
 
-    const startIndex = TRANSITION_CATEGORY_START_INDICES.custom ?? 0;
-    const flatConfig = TRANSITION_PRESENTATION_CONFIGS[startIndex + glitchIndex];
+    const startIndex = getTransitionCategoryStartIndices().custom ?? 0;
+    const flatConfig = getTransitionPresentationConfigs()[startIndex + glitchIndex];
     const groupedConfig = customConfigs[glitchIndex];
 
     expect(flatConfig).toBeDefined();
@@ -40,17 +40,17 @@ describe('transition-ui-config', () => {
   });
 
   it('shows chromatic in its own category instead of custom', () => {
-    const chromaticConfigs = TRANSITION_CONFIGS_BY_CATEGORY.chromatic ?? [];
-    const customConfigs = TRANSITION_CONFIGS_BY_CATEGORY.custom ?? [];
+    const chromaticConfigs = getTransitionConfigsByCategory().chromatic ?? [];
+    const customConfigs = getTransitionConfigsByCategory().custom ?? [];
 
     expect(chromaticConfigs.some((config) => config.id === 'chromatic')).toBe(true);
     expect(customConfigs.some((config) => config.id === 'chromatic')).toBe(false);
   });
 
   it('shows sparkles in the custom category', () => {
-    const customConfigs = TRANSITION_CONFIGS_BY_CATEGORY.custom ?? [];
+    const customConfigs = getTransitionConfigsByCategory().custom ?? [];
 
     expect(customConfigs.some((config) => config.id === 'sparkles')).toBe(true);
-    expect((TRANSITION_CONFIGS_BY_CATEGORY.light ?? []).some((config) => config.id === 'sparkles')).toBe(false);
+    expect((getTransitionConfigsByCategory().light ?? []).some((config) => config.id === 'sparkles')).toBe(false);
   });
 });

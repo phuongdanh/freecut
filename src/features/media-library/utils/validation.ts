@@ -2,14 +2,14 @@
  * Media file validation utilities
  */
 
-import { formatBytes } from '@/utils/format-utils';
-
 // Supported file types based on requirements
 const SUPPORTED_VIDEO_TYPES = [
   'video/mp4',
   'video/webm',
   'video/quicktime', // .mov files
   'video/x-matroska', // .mkv files
+  'video/matroska', // .mkv files (alternate browser MIME)
+  'video/x-msvideo', // .avi files
 ];
 
 const SUPPORTED_AUDIO_TYPES = [
@@ -17,6 +17,8 @@ const SUPPORTED_AUDIO_TYPES = [
   'audio/mpeg', // MP3 also uses audio/mpeg
   'audio/wav',
   'audio/aac',
+  'audio/x-m4a', // .m4a files
+  'audio/mp4', // .m4a also reported as audio/mp4
   'audio/ogg', // Opus codec in Ogg container
 ];
 
@@ -26,9 +28,18 @@ const SUPPORTED_IMAGE_TYPES = [
   'image/png',
   'image/gif',
   'image/webp',
+  'image/svg+xml', // .svg files
 ];
 
-const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
+const GENERIC_BROWSER_MIME_TYPES = new Set([
+  '',
+  'application/octet-stream',
+  'binary/octet-stream',
+]);
+const EXTENSION_PREFERRED_MIME_TYPES = new Set([
+  '.mkv',
+  '.m4a',
+]);
 
 // Extension to MIME type mapping for fallback when browser doesn't provide MIME type
 const EXTENSION_TO_MIME: Record<string, string> = {
@@ -37,10 +48,12 @@ const EXTENSION_TO_MIME: Record<string, string> = {
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
   '.mkv': 'video/x-matroska',
+  '.avi': 'video/x-msvideo',
   // Audio
   '.mp3': 'audio/mpeg',
   '.wav': 'audio/wav',
   '.aac': 'audio/aac',
+  '.m4a': 'audio/x-m4a',
   '.ogg': 'audio/ogg',
   '.opus': 'audio/ogg',
   // Image
@@ -49,18 +62,27 @@ const EXTENSION_TO_MIME: Record<string, string> = {
   '.png': 'image/png',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
 };
 
 /**
  * Get MIME type from file, falling back to extension-based detection
  */
 export function getMimeType(file: File): string {
-  if (file.type) {
+  const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
+  const extensionMimeType = ext ? EXTENSION_TO_MIME[ext] : undefined;
+
+  // Prefer the extension for formats whose browser-reported MIME commonly
+  // varies despite the media kind staying the same (for example .mkv, .m4a).
+  if (ext && extensionMimeType && EXTENSION_PREFERRED_MIME_TYPES.has(ext)) {
+    return extensionMimeType;
+  }
+
+  if (!GENERIC_BROWSER_MIME_TYPES.has(file.type)) {
     return file.type;
   }
-  // Fallback to extension-based detection
-  const ext = file.name.toLowerCase().match(/\.[^.]+$/)?.[0];
-  return ext ? EXTENSION_TO_MIME[ext] || '' : '';
+
+  return extensionMimeType || '';
 }
 
 interface ValidationResult {
@@ -77,16 +99,11 @@ export function validateMediaFile(file: File): ValidationResult {
     return { valid: false, error: 'File is empty' };
   }
 
-  if (file.size > MAX_FILE_SIZE) {
-    return {
-      valid: false,
-      error: `File too large. Maximum size is ${formatBytes(MAX_FILE_SIZE)}`,
-    };
-  }
-
   // Check MIME type (with extension-based fallback for files like .mkv where browser doesn't provide MIME)
   // SECURITY NOTE: This validation relies on client-provided MIME types which can be spoofed.
   // For production use, consider adding server-side validation that checks file headers/magic numbers.
+  // SVG files must be treated as untrusted content downstream; render them as image sources and avoid
+  // inline DOM injection where embedded scripts or event handlers could execute.
   // Additional validation with mediabunny.canDecode() is performed during metadata extraction.
   const allSupportedTypes = [
     ...SUPPORTED_VIDEO_TYPES,
@@ -98,7 +115,7 @@ export function validateMediaFile(file: File): ValidationResult {
   if (!allSupportedTypes.includes(mimeType)) {
     return {
       valid: false,
-      error: `Unsupported file type: ${mimeType || file.name.split('.').pop()}. Supported types: video (mp4, webm, mov, mkv), audio (mp3, wav, aac, ogg/opus), image (jpg, png, gif, webp)`,
+      error: `Unsupported file type: ${mimeType || file.name.split('.').pop()}. Supported types: video (mp4, webm, mov, mkv, avi), audio (mp3, wav, aac, m4a, ogg/opus), image (jpg/jpeg, png, gif, webp, svg)`,
     };
   }
 

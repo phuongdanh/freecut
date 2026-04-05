@@ -35,10 +35,10 @@ import { createLogger } from '@/shared/logging/logger';
 import { useMediaLibraryStore } from '@/features/composition-runtime/deps/stores';
 
 const warmupLog = createLogger('StableVideoWarmup');
-const SHADOW_MOUNT_LOOKAHEAD_FRAMES = 3;
+const SAME_ORIGIN_SHADOW_MOUNT_LOOKAHEAD_FRAMES = 8;
 const SHADOW_UNMOUNT_COOLDOWN_FRAMES = 3;
 const TRANSITION_SYNC_COOLDOWN_FRAMES = 3;
-const TRANSITION_WARMUP_LOOKAHEAD_SECONDS = 0.5;
+const TRANSITION_WARMUP_LOOKAHEAD_SECONDS = 1.5;
 
 /** Video item with additional properties added by MainComposition */
 export type StableVideoSequenceItem = VideoItem & {
@@ -125,6 +125,11 @@ function areGroupPropsEqual(
         prevItem.durationInFrames !== nextItem.durationInFrames ||
         prevItem.trackVisible !== nextItem.trackVisible ||
         prevItem.muted !== nextItem.muted ||
+        (prevItem.crop?.left ?? 0) !== (nextItem.crop?.left ?? 0) ||
+        (prevItem.crop?.right ?? 0) !== (nextItem.crop?.right ?? 0) ||
+        (prevItem.crop?.top ?? 0) !== (nextItem.crop?.top ?? 0) ||
+        (prevItem.crop?.bottom ?? 0) !== (nextItem.crop?.bottom ?? 0) ||
+        (prevItem.crop?.softness ?? 0) !== (nextItem.crop?.softness ?? 0) ||
         prevItem.cornerPin !== nextItem.cornerPin ||
         prevItem.blendMode !== nextItem.blendMode) {
       return false;
@@ -202,7 +207,29 @@ const GroupRenderer: React.FC<{
 
   // Find the active item ID for current frame
   // During premount, don't find any active item - we shouldn't render.
-  const activeItemIndex = isPremounted ? -1 : findActiveVideoItemIndex(group.items, globalFrame);
+  const rawActiveItemIndex = isPremounted ? -1 : findActiveVideoItemIndex(group.items, globalFrame);
+
+  // Stabilize active index during same-origin transitions.
+  // When two items in the same group participate in a transition (A→A clip,
+  // same media/origin split), the active index switches mid-transition at
+  // the cut point. This causes the primary pool lane's video element to
+  // seek to a different source position and the shadow to remount — both
+  // stalling frame delivery for 200-500ms. Keep the LEFT clip as active
+  // throughout the transition so pool lanes and shadows stay stable.
+  const activeItemIndex = useMemo(() => {
+    if (rawActiveItemIndex < 0 || group.items.length <= 1) return rawActiveItemIndex;
+    for (const tw of transitionWindows) {
+      if (globalFrame >= tw.startFrame && globalFrame < tw.endFrame) {
+        const leftIdx = group.items.findIndex((i) => i.id === tw.leftClip.id);
+        const rightIdx = group.items.findIndex((i) => i.id === tw.rightClip.id);
+        if (leftIdx >= 0 && rightIdx >= 0 && rawActiveItemIndex === rightIdx) {
+          return leftIdx;
+        }
+      }
+    }
+    return rawActiveItemIndex;
+  }, [rawActiveItemIndex, globalFrame, group.items, transitionWindows]);
+
   const activeItem = activeItemIndex >= 0 ? group.items[activeItemIndex] : null;
 
   const { fps } = useVideoConfig();
@@ -227,10 +254,11 @@ const GroupRenderer: React.FC<{
   // normal playback keeps using the simple single-clip path until near the cut.
   const overlapKey = useMemo(() => {
     if (isPremounted || activeItemIndex < 0 || group.items.length <= 1) return '';
+    const shadowMountLookaheadFrames = SAME_ORIGIN_SHADOW_MOUNT_LOOKAHEAD_FRAMES;
     const transitionClipIds = collectTransitionParticipantClipIds({
       transitionWindows,
       frame: globalFrame,
-      lookaheadFrames: SHADOW_MOUNT_LOOKAHEAD_FRAMES,
+      lookaheadFrames: shadowMountLookaheadFrames,
       lookbehindFrames: SHADOW_UNMOUNT_COOLDOWN_FRAMES,
     });
     return group.items

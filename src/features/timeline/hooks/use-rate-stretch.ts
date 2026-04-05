@@ -1,5 +1,7 @@
 import { useState, useCallback, useRef, useEffect, useEffectEvent } from 'react';
 import type { TimelineItem } from '@/types/timeline';
+import { useEditorStore } from '@/shared/state/editor';
+import { usePlaybackStore } from '@/shared/state/playback';
 import type { SnapTarget } from '../types/drag';
 import { useTimelineStore } from '../stores/timeline-store';
 import { useSelectionStore } from '@/shared/state/selection';
@@ -13,11 +15,106 @@ import {
   sourceToTimelineFrames,
   timelineToSourceFrames,
 } from '../utils/source-calculations';
+import { useLinkedEditPreviewStore } from '../stores/linked-edit-preview-store';
+import { getSynchronizedLinkedItems, getLinkedItemIds } from '../utils/linked-items';
+import { applyRateStretchPreview, applyMovePreview } from '../utils/item-edit-preview';
+import type { PreviewItemUpdate } from '../utils/item-edit-preview';
+import { useTransitionsStore } from '../stores/transitions-store';
 
 type StretchHandle = 'start' | 'end';
 
 // For GIFs/images that loop, use generous duration limits (1 frame to ~10 minutes at 30fps)
 const LOOPING_MEDIA_MAX_DURATION = 30 * 60 * 10; // 10 minutes at 30fps
+
+export function isRateStretchableItem(item: Pick<TimelineItem, 'type' | 'label'>): boolean {
+  const isGifImage = item.type === 'image' && item.label?.toLowerCase().endsWith('.gif');
+  return item.type === 'video' || item.type === 'audio' || item.type === 'composition' || isGifImage;
+}
+
+export function getLoopingMediaStretchPreviewSpeed(initialSpeed: number, deltaFrames: number): number {
+  const speedDelta = -(deltaFrames / 30) * 0.1;
+  return Math.round(Math.max(MIN_SPEED, Math.min(MAX_SPEED, initialSpeed + speedDelta)) * 100) / 100;
+}
+
+/**
+ * Compute preview updates for adjacent clips that will be rippled
+ * when the rate stretch commits. Mirrors the ripple logic in rateStretchItem action.
+ */
+function computeRipplePreviewUpdates(
+  items: TimelineItem[],
+  stretchedItemId: string,
+  synchronizedIds: Set<string>,
+  oldFrom: number,
+  oldEnd: number,
+  previewFrom: number,
+  previewEnd: number,
+): PreviewItemUpdate[] {
+  const fromDelta = previewFrom - oldFrom;
+  const endDelta = previewEnd - oldEnd;
+  if (fromDelta === 0 && endDelta === 0) return [];
+
+  const transitions = useTransitionsStore.getState().transitions;
+  const movedIds = new Set<string>();
+  const updates: PreviewItemUpdate[] = [];
+
+  // Collect tracks touched by the stretched item + synchronized items
+  const touchedTrackIds = new Set<string>();
+  for (const i of items) {
+    if (synchronizedIds.has(i.id)) touchedTrackIds.add(i.trackId);
+  }
+
+  const addMove = (itemId: string, delta: number) => {
+    if (movedIds.has(itemId)) return;
+    const it = items.find((i) => i.id === itemId);
+    if (!it) return;
+    movedIds.add(itemId);
+    updates.push(applyMovePreview(it, delta));
+
+    for (const linkedId of getLinkedItemIds(items, itemId)) {
+      if (linkedId === itemId || movedIds.has(linkedId)) continue;
+      const linked = items.find((i) => i.id === linkedId);
+      if (linked) {
+        movedIds.add(linkedId);
+        updates.push(applyMovePreview(linked, delta));
+      }
+    }
+  };
+
+  if (endDelta !== 0) {
+    for (const trackId of touchedTrackIds) {
+      for (const i of items) {
+        if (i.trackId === trackId && !synchronizedIds.has(i.id) && i.from >= oldEnd) {
+          addMove(i.id, endDelta);
+        }
+      }
+    }
+    // Transition-connected neighbors at stretched clip's end
+    for (const t of transitions) {
+      if (synchronizedIds.has(t.leftClipId) && !synchronizedIds.has(t.rightClipId)) {
+        addMove(t.rightClipId, endDelta);
+      }
+    }
+  }
+
+  if (fromDelta !== 0) {
+    for (const trackId of touchedTrackIds) {
+      for (const i of items) {
+        if (i.trackId === trackId && !synchronizedIds.has(i.id)) {
+          const iEnd = i.from + i.durationInFrames;
+          if (iEnd <= oldFrom) addMove(i.id, fromDelta);
+        }
+      }
+    }
+    // Transition-connected neighbors at stretched clip's start
+    for (const t of transitions) {
+      if (synchronizedIds.has(t.rightClipId) && !synchronizedIds.has(t.leftClipId)) {
+        addMove(t.leftClipId, fromDelta);
+      }
+    }
+  }
+
+  return updates;
+}
 
 interface StretchState {
   isStretching: boolean;
@@ -30,6 +127,8 @@ interface StretchState {
   initialSpeed: number;
   currentDelta: number; // Track current delta for visual feedback
   isLoopingMedia: boolean; // GIFs and images can loop infinitely
+  isConstrained: boolean;
+  constraintLabel: string | null;
 }
 
 function getExactTimelineDurationForSource(
@@ -175,6 +274,8 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
     initialSpeed: 1,
     currentDelta: 0,
     isLoopingMedia: false,
+    isConstrained: false,
+    constraintLabel: null,
   });
 
   const stretchStateRef = useRef(stretchState);
@@ -221,15 +322,26 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
     const deltaTime = pixelsToTime(deltaX);
     let deltaFrames = Math.round(deltaTime * fps);
 
-    const { handle, initialFrom, initialDuration, sourceDuration, sourceFps, isLoopingMedia } = stretchStateRef.current;
+    const { handle, initialFrom, initialDuration, sourceDuration, sourceFps, initialSpeed, isLoopingMedia } = stretchStateRef.current;
 
-    // For looping media (GIFs): don't change duration, only track delta for speed calculation
-    // Dragging right = faster (positive delta), dragging left = slower (negative delta)
+    // For looping media (GIFs): don't change duration, only track delta for speed calculation.
+    // Directional rate stretch keeps body drags consistent: left = faster, right = slower.
     if (isLoopingMedia) {
+      const speedDelta = -(deltaFrames / 30) * 0.1;
+      const unconstrainedSpeed = initialSpeed + speedDelta;
+      const previewSpeed = getLoopingMediaStretchPreviewSpeed(initialSpeed, deltaFrames);
+      const isConstrained = Math.abs(previewSpeed - unconstrainedSpeed) > 0.0001;
       // Update local state for speed calculation (duration stays same)
-      if (deltaFrames !== stretchStateRef.current.currentDelta) {
-        setStretchState(prev => ({ ...prev, currentDelta: deltaFrames }));
+      if (deltaFrames !== stretchStateRef.current.currentDelta || isConstrained !== stretchStateRef.current.isConstrained) {
+        setStretchState(prev => ({ ...prev, currentDelta: deltaFrames, isConstrained, constraintLabel: isConstrained ? 'speed limit' : null }));
       }
+      const linkedSelectionEnabled = useEditorStore.getState().linkedSelectionEnabled;
+      const linkedPreviewUpdates = linkedSelectionEnabled
+        ? getSynchronizedLinkedItems(useTimelineStore.getState().items, item.id)
+          .filter((linkedItem) => linkedItem.id !== item.id)
+          .map((linkedItem) => applyRateStretchPreview(linkedItem, initialFrom, initialDuration, previewSpeed, fps))
+        : [];
+      useLinkedEditPreviewStore.getState().setUpdates(linkedPreviewUpdates);
       // No snap target visualization for GIFs since clip doesn't move
       return;
     }
@@ -276,10 +388,64 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
       }
     }
 
+    const proposedDuration = handle === 'start'
+      ? initialDuration - deltaFrames
+      : initialDuration + deltaFrames;
+    const isConstrained = proposedDuration < limits.min || proposedDuration > limits.max;
+
     // Update local state for visual feedback
-    if (deltaFrames !== stretchStateRef.current.currentDelta) {
-      setStretchState(prev => ({ ...prev, currentDelta: deltaFrames }));
+    if (deltaFrames !== stretchStateRef.current.currentDelta || isConstrained !== stretchStateRef.current.isConstrained) {
+      setStretchState(prev => ({
+        ...prev,
+        currentDelta: deltaFrames,
+        isConstrained,
+        constraintLabel: isConstrained ? 'speed limit' : null,
+      }));
     }
+
+    let previewDuration = Math.round(Math.max(limits.min, Math.min(limits.max, handle === 'start'
+      ? initialDuration - deltaFrames
+      : initialDuration + deltaFrames)));
+    let previewFrom = handle === 'start'
+      ? Math.round(initialFrom + (initialDuration - previewDuration))
+      : Math.round(initialFrom);
+    const resolvedPreview = resolveDurationAndSpeed(sourceDuration, previewDuration, sourceFps, fps);
+    previewDuration = resolvedPreview.duration;
+    const previewSpeed = resolvedPreview.speed;
+    if (handle === 'start') {
+      previewFrom = Math.round(initialFrom + (initialDuration - previewDuration));
+    }
+
+    const allItems = useTimelineStore.getState().items;
+    const linkedSelectionEnabled = useEditorStore.getState().linkedSelectionEnabled;
+    const synchronizedItems = linkedSelectionEnabled
+      ? getSynchronizedLinkedItems(allItems, item.id)
+      : [item];
+    const synchronizedIds = new Set(synchronizedItems.map((si) => si.id));
+
+    // Include the stretched item's own preview so the transition bridge can track it
+    const stretchedItemPreview: PreviewItemUpdate = {
+      id: item.id,
+      from: previewFrom,
+      durationInFrames: previewDuration,
+      speed: previewSpeed,
+    };
+
+    const linkedPreviewUpdates = linkedSelectionEnabled
+      ? synchronizedItems
+        .filter((linkedItem) => linkedItem.id !== item.id)
+        .map((linkedItem) => applyRateStretchPreview(linkedItem, linkedItem.from + (previewFrom - initialFrom), previewDuration, previewSpeed, fps))
+      : [];
+
+    // Compute ripple preview for adjacent clips that will be pushed/pulled
+    const oldEnd = initialFrom + initialDuration;
+    const previewEnd = previewFrom + previewDuration;
+    const rippleUpdates = computeRipplePreviewUpdates(
+      allItems, item.id, synchronizedIds,
+      initialFrom, oldEnd, previewFrom, previewEnd,
+    );
+
+    useLinkedEditPreviewStore.getState().setUpdates([stretchedItemPreview, ...linkedPreviewUpdates, ...rippleUpdates]);
 
     // Update snap target visualization (only when changed)
     const prevSnap = prevSnapTargetRef.current;
@@ -309,18 +475,15 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
       let newFrom: number;
       let newSpeed: number;
 
-      // For looping media (GIFs): only change speed, keep duration the same
-      // Drag right = faster (positive delta increases speed)
-      // Drag left = slower (negative delta decreases speed)
+      // For looping media (GIFs): only change speed, keep duration the same.
+      // Directional rate stretch keeps body drags consistent: left = faster, right = slower.
       if (isLoopingMedia) {
         newDuration = initialDuration; // Duration stays the same
         newFrom = initialFrom; // Position stays the same
 
-        // Calculate speed change based on drag distance
-        // Use a sensitivity factor: ~30 pixels per 0.1x speed change
-        const speedDelta = currentDelta / 30 * 0.1;
-        // Round to 2 decimal places for consistent precision
-        newSpeed = Math.round(Math.max(MIN_SPEED, Math.min(MAX_SPEED, initialSpeed + speedDelta)) * 100) / 100;
+        // Calculate speed change based on drag distance.
+        // Use a sensitivity factor: ~30 pixels per 0.1x speed change.
+        newSpeed = getLoopingMediaStretchPreviewSpeed(initialSpeed, currentDelta);
 
         // Only update if speed actually changed
         if (Math.abs(newSpeed - initialSpeed) > 0.01) {
@@ -357,6 +520,7 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
 
       // Clear drag state (including snap indicator)
       setDragState(null);
+      useLinkedEditPreviewStore.getState().clear();
       prevSnapTargetRef.current = null;
 
       setStretchState({
@@ -370,6 +534,8 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
         initialSpeed: 1,
         currentDelta: 0,
         isLoopingMedia: false,
+        isConstrained: false,
+        constraintLabel: null,
       });
     }
   });
@@ -384,6 +550,7 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
       return () => {
         window.removeEventListener('mousemove', onMouseMove);
         window.removeEventListener('mouseup', onMouseUp);
+        useLinkedEditPreviewStore.getState().clear();
       };
     }
   }, [stretchState.isStretching]);
@@ -398,12 +565,19 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
       // Get fresh item from store to ensure we have latest values after previous operations
       const currentItem = getItemFromStore();
 
-      // Only works on video/audio/gif items
-      const isGifImage = currentItem.type === 'image' && currentItem.label?.toLowerCase().endsWith('.gif');
-      if (currentItem.type !== 'video' && currentItem.type !== 'audio' && !isGifImage) return;
+      // Only works on source-bounded items and GIFs.
+      if (!isRateStretchableItem(currentItem)) return;
 
       e.stopPropagation();
       e.preventDefault();
+      usePlaybackStore.getState().setPreviewFrame(null);
+
+      setDragState({
+        isDragging: true,
+        draggedItemIds: [item.id],
+        offset: { x: 0, y: 0 },
+        activeSnapTarget: null,
+      });
 
       const currentSpeed = currentItem.speed || 1;
       const isLoopingMedia = currentItem.type === 'image'; // GIFs (images) can loop infinitely
@@ -439,6 +613,8 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
         initialSpeed: currentSpeed,
         currentDelta: 0,
         isLoopingMedia,
+        isConstrained: false,
+        constraintLabel: null,
       });
     },
     [trackLocked, getItemFromStore]
@@ -452,9 +628,7 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
 
     // For looping media (GIFs): duration and position stay the same, only speed changes
     if (isLoopingMedia) {
-      const speedDelta = currentDelta / 30 * 0.1;
-      // Round to 2 decimal places for consistent precision
-      const previewSpeed = Math.round(Math.max(MIN_SPEED, Math.min(MAX_SPEED, initialSpeed + speedDelta)) * 100) / 100;
+      const previewSpeed = getLoopingMediaStretchPreviewSpeed(initialSpeed, currentDelta);
 
       return {
         from: initialFrom,
@@ -497,6 +671,8 @@ export function useRateStretch(item: TimelineItem, timelineDuration: number, tra
     isStretching: stretchState.isStretching,
     stretchHandle: stretchState.handle,
     stretchDelta: stretchState.currentDelta,
+    stretchConstrained: stretchState.isConstrained,
+    stretchConstraintLabel: stretchState.constraintLabel,
     handleStretchStart,
     getVisualFeedback,
   };

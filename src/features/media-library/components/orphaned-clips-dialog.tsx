@@ -142,7 +142,7 @@ export function OrphanedClipsDialog() {
   return (
     <>
       <Dialog open={showDialog} onOpenChange={(open) => !open && handleClose()}>
-        <DialogContent className="sm:max-w-[600px] max-h-[80vh]">
+        <DialogContent className="max-h-[80vh] w-[min(92vw,960px)] max-w-[960px]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Link2Off className="w-5 h-5 text-destructive" />
@@ -178,20 +178,22 @@ export function OrphanedClipsDialog() {
                 return (
                   <div
                     key={orphan.itemId}
-                    className="flex items-center gap-3 p-3 bg-secondary/50 rounded-lg border border-border"
+                    className="flex items-start gap-3 rounded-lg border border-border bg-secondary/50 p-3"
                   >
                     <div className="p-1.5 rounded bg-destructive/20">
                       <IconComponent className="w-4 h-4 text-destructive" />
                     </div>
 
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{orphan.fileName}</p>
+                      <p className="text-sm font-medium leading-snug break-words">
+                        {orphan.fileName}
+                      </p>
                       <p className="text-xs text-muted-foreground">
-                        {orphan.itemType} clip â€¢ Media deleted
+                        {orphan.itemType} clip - Media deleted
                       </p>
                     </div>
 
-                    <div className="flex gap-1">
+                    <div className="flex shrink-0 gap-1 self-center">
                       <Button
                         size="sm"
                         variant="outline"

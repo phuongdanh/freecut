@@ -3,9 +3,12 @@ import { Columns2 } from 'lucide-react';
 import {
   VideoPreview,
   PlaybackControls,
+  AlignmentToolbar,
   TimecodeDisplay,
   PreviewZoomControls,
   SourceMonitor,
+  InlineSourcePreview,
+  InlineCompositionPreview,
   ColorScopesMonitor,
 } from '@/features/editor/deps/preview';
 import { useTimelineStore } from '@/features/editor/deps/timeline-store';
@@ -33,19 +36,7 @@ const PREVIEW_SOURCE_SPLIT_DEFAULT_PERCENT = 50;
 const PREVIEW_SCOPES_SPLIT_DEFAULT_PERCENT = 32;
 const PREVIEW_SIDE_PANEL_MIN_PERCENT = 22;
 const PREVIEW_SIDE_PANEL_MAX_PERCENT = 55;
-const PREVIEW_PROGRAM_MIN_PERCENT = 30;
 
-function clampSidePanelPercent(nextPercent: number, oppositePercent: number): number {
-  const maxPercent = Math.max(
-    0,
-    Math.min(
-      PREVIEW_SIDE_PANEL_MAX_PERCENT,
-      100 - PREVIEW_PROGRAM_MIN_PERCENT - oppositePercent
-    )
-  );
-  const minPercent = Math.min(PREVIEW_SIDE_PANEL_MIN_PERCENT, maxPercent);
-  return Math.min(maxPercent, Math.max(minPercent, nextPercent));
-}
 
 function PreviewSplitHandle({
   onMouseDown,
@@ -79,6 +70,53 @@ function PreviewSplitHandle({
     </div>
   );
 }
+
+const ProgramPreviewSurface = memo(function ProgramPreviewSurface({
+  project,
+  containerSize,
+  suspendOverlay,
+}: {
+  project: {
+    width: number;
+    height: number;
+    fps: number;
+    backgroundColor?: string;
+  };
+  containerSize: {
+    width: number;
+    height: number;
+  };
+  suspendOverlay: boolean;
+}) {
+  const mediaSkimPreviewMediaId = useEditorStore((s) => s.mediaSkimPreviewMediaId);
+  const mediaSkimPreviewFrame = useEditorStore((s) => s.mediaSkimPreviewFrame);
+  const compoundClipSkimPreviewCompositionId = useEditorStore((s) => s.compoundClipSkimPreviewCompositionId);
+  const compoundClipSkimPreviewFrame = useEditorStore((s) => s.compoundClipSkimPreviewFrame);
+
+  return (
+    <ErrorBoundary level="component">
+      {compoundClipSkimPreviewCompositionId ? (
+        <InlineCompositionPreview
+          compositionId={compoundClipSkimPreviewCompositionId}
+          seekFrame={compoundClipSkimPreviewFrame}
+          containerSize={containerSize}
+        />
+      ) : mediaSkimPreviewMediaId ? (
+        <InlineSourcePreview
+          mediaId={mediaSkimPreviewMediaId}
+          seekFrame={mediaSkimPreviewFrame}
+          containerSize={containerSize}
+        />
+      ) : (
+        <VideoPreview
+          project={project}
+          containerSize={containerSize}
+          suspendOverlay={suspendOverlay}
+        />
+      )}
+    </ErrorBoundary>
+  );
+});
 
 /**
  * Preview Area Component
@@ -248,40 +286,25 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
     useEditorStore.getState().setColorScopesOpen(false);
   }, []);
 
-  const displayedSourceSplitPercent = sourcePreviewMediaId
-    ? clampSidePanelPercent(sourceSplitPercent, colorScopesOpen ? scopesSplitPercent : 0)
-    : 0;
+  // Scopes get their absolute percentage (clamped independently)
   const displayedScopesSplitPercent = colorScopesOpen
-    ? clampSidePanelPercent(scopesSplitPercent, sourcePreviewMediaId ? displayedSourceSplitPercent : 0)
+    ? Math.max(PREVIEW_SIDE_PANEL_MIN_PERCENT, Math.min(PREVIEW_SIDE_PANEL_MAX_PERCENT, scopesSplitPercent))
     : 0;
-  const sourceResetPercent = sourcePreviewMediaId
-    ? clampSidePanelPercent(
-      PREVIEW_SOURCE_SPLIT_DEFAULT_PERCENT,
-      colorScopesOpen ? displayedScopesSplitPercent : 0
-    )
-    : PREVIEW_SOURCE_SPLIT_DEFAULT_PERCENT;
-  const scopesResetPercent = colorScopesOpen
-    ? clampSidePanelPercent(
-      PREVIEW_SCOPES_SPLIT_DEFAULT_PERCENT,
-      sourcePreviewMediaId ? displayedSourceSplitPercent : 0
-    )
-    : PREVIEW_SCOPES_SPLIT_DEFAULT_PERCENT;
 
-  useEffect(() => {
-    if (sourcePreviewMediaId) {
-      setSourceSplitPercent((prev) => {
-        const next = clampSidePanelPercent(prev, colorScopesOpen ? scopesSplitPercent : 0);
-        return prev === next ? prev : next;
-      });
-    }
+  // sourceSplitPercent is a ratio (0-100) of the source+program space.
+  // Both panels shrink proportionally when scopes open.
+  const availableForSourceProgram = 100 - displayedScopesSplitPercent;
+  const proportionalSource = (sourceSplitPercent / 100) * availableForSourceProgram;
+  const displayedSourceSplitPercent = sourcePreviewMediaId
+    ? Math.max(
+        PREVIEW_SIDE_PANEL_MIN_PERCENT,
+        Math.min(availableForSourceProgram - PREVIEW_SIDE_PANEL_MIN_PERCENT, proportionalSource),
+      )
+    : 0;
 
-    if (colorScopesOpen) {
-      setScopesSplitPercent((prev) => {
-        const next = clampSidePanelPercent(prev, sourcePreviewMediaId ? sourceSplitPercent : 0);
-        return prev === next ? prev : next;
-      });
-    }
-  }, [colorScopesOpen, scopesSplitPercent, sourcePreviewMediaId, sourceSplitPercent]);
+  const sourceResetPercent = PREVIEW_SOURCE_SPLIT_DEFAULT_PERCENT;
+  const scopesResetPercent = PREVIEW_SCOPES_SPLIT_DEFAULT_PERCENT;
+
 
   const handleResetSourceSplit = useCallback(() => {
     setSourceSplitPercent(sourceResetPercent);
@@ -301,7 +324,11 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
     const handleMouseMove = (mouseEvent: MouseEvent) => {
       if (!isDraggingSourceSplitRef.current || !splitContainerRef.current) return;
       const rect = splitContainerRef.current.getBoundingClientRect();
-      pendingSourceSplitPercentRef.current = ((mouseEvent.clientX - rect.left) / rect.width) * 100;
+      const absPercent = ((mouseEvent.clientX - rect.left) / rect.width) * 100;
+      // Convert absolute position to ratio of source+program space
+      const available = 100 - (colorScopesOpen ? displayedScopesSplitPercent : 0);
+      pendingSourceSplitPercentRef.current =
+        available > 0 ? Math.max(0, Math.min(100, (absPercent / available) * 100)) : 50;
 
       if (sourceSplitDragRafRef.current !== null) return;
       sourceSplitDragRafRef.current = requestAnimationFrame(() => {
@@ -313,12 +340,7 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
         lastSourceSplitDragUpdateTsRef.current = now;
         const pendingPercent = pendingSourceSplitPercentRef.current;
         if (pendingPercent !== null) {
-          setSourceSplitPercent(
-            clampSidePanelPercent(
-              pendingPercent,
-              colorScopesOpen ? displayedScopesSplitPercent : 0
-            )
-          );
+          setSourceSplitPercent(pendingPercent);
         }
       });
     };
@@ -326,12 +348,7 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
     const cleanup = () => {
       const pendingPercent = pendingSourceSplitPercentRef.current;
       if (pendingPercent !== null) {
-        setSourceSplitPercent(
-          clampSidePanelPercent(
-            pendingPercent,
-            colorScopesOpen ? displayedScopesSplitPercent : 0
-          )
-        );
+        setSourceSplitPercent(pendingPercent);
       }
       if (sourceSplitDragRafRef.current !== null) {
         cancelAnimationFrame(sourceSplitDragRafRef.current);
@@ -379,10 +396,7 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
         const pendingPercent = pendingScopesSplitPercentRef.current;
         if (pendingPercent !== null) {
           setScopesSplitPercent(
-            clampSidePanelPercent(
-              pendingPercent,
-              sourcePreviewMediaId ? displayedSourceSplitPercent : 0
-            )
+            Math.max(PREVIEW_SIDE_PANEL_MIN_PERCENT, Math.min(PREVIEW_SIDE_PANEL_MAX_PERCENT, pendingPercent))
           );
         }
       });
@@ -392,10 +406,7 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
       const pendingPercent = pendingScopesSplitPercentRef.current;
       if (pendingPercent !== null) {
         setScopesSplitPercent(
-          clampSidePanelPercent(
-            pendingPercent,
-            sourcePreviewMediaId ? displayedSourceSplitPercent : 0
-          )
+          Math.max(PREVIEW_SIDE_PANEL_MIN_PERCENT, Math.min(PREVIEW_SIDE_PANEL_MAX_PERCENT, pendingPercent))
         );
       }
       if (scopesSplitDragRafRef.current !== null) {
@@ -419,7 +430,7 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
     scopesSplitDragCleanupRef.current = cleanup;
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-  }, [displayedSourceSplitPercent, sourcePreviewMediaId]);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -481,13 +492,11 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
 
         <div className="flex-1 flex flex-col min-w-0 min-h-0">
           <div ref={previewContainerRef} className="flex-1 min-h-0 relative overflow-hidden" aria-label="Preview canvas region">
-            <ErrorBoundary level="component">
-              <VideoPreview
-                project={liveProject}
-                containerSize={containerSize}
-                suspendOverlay={isPanelDragging}
-              />
-            </ErrorBoundary>
+            <ProgramPreviewSurface
+              project={liveProject}
+              containerSize={containerSize}
+              suspendOverlay={isPanelDragging}
+            />
           </div>
 
           {isPenModeActive ? (
@@ -593,18 +602,32 @@ export const PreviewArea = memo(function PreviewArea({ project }: PreviewAreaPro
             </div>
           ) : (
             <InteractionLockRegion locked={false} overlayClassName="rounded-none">
-              <div
-                className="border-t border-border panel-header flex items-center px-3 flex-shrink-0 gap-2.5 overflow-hidden"
-                style={{ height: EDITOR_LAYOUT_CSS_VALUES.previewControlsHeight }}
-              >
-                <div className="flex-shrink-0">
-                  <TimecodeDisplay fps={fps} totalFrames={totalFrames} />
+              <div className="flex flex-col flex-shrink-0">
+                {/* Alignment row */}
+                <div className="border-t border-border panel-header flex items-center justify-center px-3 h-7 overflow-hidden">
+                  <div className="flex items-center gap-0">
+                    <AlignmentToolbar projectSize={{ width, height }} />
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0" />
-                <PlaybackControls totalFrames={totalFrames} fps={fps} />
-                <div className="flex-1 min-w-0" />
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <PreviewZoomControls />
+
+                {/* Playback controls row */}
+                <div
+                  className="@container border-t border-border panel-header relative flex items-center px-3 overflow-hidden"
+                  style={{ height: EDITOR_LAYOUT_CSS_VALUES.previewControlsHeight }}
+                >
+                  <div className="flex-shrink-0">
+                    <TimecodeDisplay fps={fps} totalFrames={totalFrames} />
+                  </div>
+
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="flex items-center gap-2.5 pointer-events-auto">
+                      <PlaybackControls totalFrames={totalFrames} fps={fps} />
+                    </div>
+                  </div>
+
+                  <div className="ml-auto flex-shrink-0">
+                    <PreviewZoomControls />
+                  </div>
                 </div>
               </div>
             </InteractionLockRegion>

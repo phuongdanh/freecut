@@ -1,3 +1,5 @@
+import { calculateTransitionPortions } from '@/domain/timeline/transitions/transition-planner';
+
 export interface RollingPreviewLike {
   trimmedItemId: string | null;
   neighborItemId: string | null;
@@ -18,10 +20,22 @@ export interface RipplePreviewLike {
   isDownstream: boolean;
 }
 
+export interface LinkedEditPreviewLike {
+  from?: number;
+  durationInFrames?: number;
+}
+
+export interface TrackPushPreviewLike {
+  delta: number;
+  isShifted: boolean;
+}
+
 export interface PreviewAdjustments {
   rolling: RollingPreviewLike;
   slide: SlidePreviewLike;
   ripple: RipplePreviewLike;
+  linkedEdit?: LinkedEditPreviewLike | null;
+  trackPush?: TrackPushPreviewLike;
 }
 
 export interface PreviewGeometry {
@@ -80,6 +94,18 @@ export function applyPreviewGeometryToClip(
     from += ripple.delta;
   }
 
+  // Track push preview: shifted items move by delta
+  if (adjustments.trackPush?.isShifted) {
+    from += adjustments.trackPush.delta;
+  }
+
+  // Linked edit preview (rate stretch and other generic previews)
+  const { linkedEdit } = adjustments;
+  if (linkedEdit) {
+    if (linkedEdit.from !== undefined) from = linkedEdit.from;
+    if (linkedEdit.durationInFrames !== undefined) durationInFrames = linkedEdit.durationInFrames;
+  }
+
   return {
     from,
     durationInFrames: Math.max(1, durationInFrames),
@@ -89,11 +115,22 @@ export function applyPreviewGeometryToClip(
 export function getTransitionBridgeBounds(
   leftClipFrom: number,
   leftClipDurationInFrames: number,
+  rightClipFrom: number,
   transitionDurationInFrames: number,
+  alignment: number | undefined = 0.5,
 ): { leftFrame: number; rightFrame: number } {
-  const rightFrame = leftClipFrom + leftClipDurationInFrames;
+  const leftEnd = leftClipFrom + leftClipDurationInFrames;
+
+  if (Math.abs(leftEnd - rightClipFrom) <= 1) {
+    const portions = calculateTransitionPortions(transitionDurationInFrames, alignment);
+    return {
+      leftFrame: leftEnd - portions.leftPortion,
+      rightFrame: rightClipFrom + portions.rightPortion,
+    };
+  }
+
   return {
-    leftFrame: rightFrame - transitionDurationInFrames,
-    rightFrame,
+    leftFrame: leftEnd - transitionDurationInFrames,
+    rightFrame: leftEnd,
   };
 }

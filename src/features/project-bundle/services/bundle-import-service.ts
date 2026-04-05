@@ -27,6 +27,7 @@ import {
 import { generateThumbnail } from '@/features/project-bundle/deps/media-library';
 import { createLogger } from '@/shared/logging/logger';
 import { fileSystemService } from './file-system-service';
+import { restoreTimelineFromBundle } from './bundle-timeline';
 
 const logger = createLogger('BundleImportService');
 
@@ -196,39 +197,7 @@ export async function importProjectBundle(
     // Store the project folder handle for smarter relinking and path display
     rootFolderHandle: projectDir,
     rootFolderName: projectName,
-    timeline: bundleProject.timeline
-      ? {
-          tracks: bundleProject.timeline.tracks,
-          items: bundleProject.timeline.items.map((item) => {
-            // Remap mediaRef to mediaId
-            const { mediaRef, ...rest } = item;
-            return {
-              ...rest,
-              mediaId: mediaRef ? mediaIdMap.get(mediaRef) : undefined,
-              // Clear src/thumbnailUrl since they'll be regenerated from mediaId
-              src: undefined,
-              thumbnailUrl: undefined,
-            };
-          }),
-          // Also remap sub-composition items
-          compositions: bundleProject.timeline.compositions?.map((comp) => ({
-            ...comp,
-            items: comp.items.map((item) => {
-              const { mediaRef, ...rest } = item;
-              return {
-                ...rest,
-                mediaId: mediaRef ? mediaIdMap.get(mediaRef) : undefined,
-                src: undefined,
-                thumbnailUrl: undefined,
-              };
-            }),
-          })),
-          currentFrame: bundleProject.timeline.currentFrame,
-          zoomLevel: bundleProject.timeline.zoomLevel,
-          inPoint: bundleProject.timeline.inPoint,
-          outPoint: bundleProject.timeline.outPoint,
-        }
-      : undefined,
+    timeline: restoreTimelineFromBundle(bundleProject.timeline, mediaIdMap),
   };
 
   await createProject(project);
@@ -348,4 +317,3 @@ async function validateBundle(file: File): Promise<{
     return { valid: false, errors };
   }
 }
-

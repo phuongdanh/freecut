@@ -16,7 +16,7 @@ import type { ExportSettings } from '@/types/export';
 
 // Codec mapping for mediabunny
 type ClientVideoCodec = 'avc' | 'hevc' | 'vp8' | 'vp9' | 'av1';
-export type ClientAudioCodec = 'aac' | 'opus' | 'mp3' | 'flac' | 'pcm-s16';
+export type ClientAudioCodec = 'aac' | 'opus' | 'mp3' | 'pcm-s16';
 export type ClientCodec = ClientVideoCodec; // Alias for backwards compatibility
 
 // Video containers
@@ -25,6 +25,7 @@ export type ClientVideoContainer = 'mp4' | 'webm' | 'mov' | 'mkv';
 export type ClientAudioContainer = 'mp3' | 'aac' | 'wav';
 // All containers
 export type ClientContainer = ClientVideoContainer | ClientAudioContainer;
+type ExportVideoCodec = Exclude<ExportSettings['codec'], 'prores'>;
 
 // Export mode
 export type ExportMode = 'video' | 'audio';
@@ -57,38 +58,102 @@ export interface ClientRenderResult {
   fileSize: number;
 }
 
+export interface CodecSupportCheckOptions {
+  width: number;
+  height: number;
+  bitrate?: number;
+}
+
+const EXPORT_CODEC_TO_CLIENT_CODEC: Record<ExportSettings['codec'], ClientCodec> = {
+  h264: 'avc',
+  h265: 'hevc',
+  vp8: 'vp8',
+  vp9: 'vp9',
+  av1: 'av1',
+  prores: 'avc', // ProRes not supported client-side, fallback to H.264
+};
+
+const CLIENT_CODEC_TO_CONTAINER: Record<ClientCodec, ClientVideoContainer> = {
+  avc: 'mp4',
+  hevc: 'mp4',
+  vp8: 'webm',
+  vp9: 'webm',
+  av1: 'webm',
+};
+
+const EXPORT_VIDEO_CODECS_BY_CONTAINER: Record<ClientVideoContainer, ExportVideoCodec[]> = {
+  mp4: ['h264', 'h265'],
+  mov: ['h264', 'h265'],
+  webm: ['vp9', 'vp8', 'av1'],
+  mkv: ['h264', 'h265', 'vp9', 'vp8', 'av1'],
+};
+
+const CLIENT_VIDEO_CODECS_BY_CONTAINER: Record<ClientVideoContainer, ClientCodec[]> = {
+  mp4: ['avc', 'hevc'],
+  mov: ['avc', 'hevc'],
+  webm: ['vp9', 'vp8', 'av1'],
+  mkv: ['avc', 'hevc', 'vp9', 'vp8', 'av1'],
+};
+
+const DEFAULT_VIDEO_CODEC_BY_CONTAINER: Record<ClientVideoContainer, ExportVideoCodec> = {
+  mp4: 'h264',
+  mov: 'h264',
+  webm: 'vp9',
+  mkv: 'h264',
+};
+
+const DEFAULT_FALLBACK_CODEC_ORDER: ClientCodec[] = ['avc', 'hevc', 'vp9', 'vp8', 'av1'];
+
+let mediabunnyEncodeApiPromise: Promise<Pick<typeof import('mediabunny'), 'canEncodeVideo'>> | null = null;
+
+function getMediabunnyEncodeApi() {
+  if (!mediabunnyEncodeApiPromise) {
+    mediabunnyEncodeApiPromise = import('mediabunny').then(({ canEncodeVideo }) => ({ canEncodeVideo }));
+  }
+
+  return mediabunnyEncodeApiPromise;
+}
+
+export function getCompatibleVideoCodecs(container: ClientVideoContainer): ExportVideoCodec[] {
+  return [...EXPORT_VIDEO_CODECS_BY_CONTAINER[container]];
+}
+
+export function getDefaultVideoCodec(container: ClientVideoContainer): ExportVideoCodec {
+  return DEFAULT_VIDEO_CODEC_BY_CONTAINER[container];
+}
+
+export function mapExportCodecToClientCodec(codec: ExportSettings['codec']): ClientCodec {
+  return EXPORT_CODEC_TO_CLIENT_CODEC[codec];
+}
+
+export function getPreferredContainerForCodec(codec: ClientCodec): ClientVideoContainer {
+  return CLIENT_CODEC_TO_CONTAINER[codec];
+}
+
+export function isVideoCodecCompatibleWithContainer(
+  codec: ClientCodec,
+  container: ClientVideoContainer
+): boolean {
+  return CLIENT_VIDEO_CODECS_BY_CONTAINER[container].includes(codec);
+}
+
+export function selectFallbackVideoCodec(
+  supportedCodecs: ClientCodec[],
+  container?: ClientVideoContainer
+): ClientCodec | null {
+  const candidates = container
+    ? CLIENT_VIDEO_CODECS_BY_CONTAINER[container]
+    : DEFAULT_FALLBACK_CODEC_ORDER;
+
+  return candidates.find((codec) => supportedCodecs.includes(codec)) ?? null;
+}
+
 /**
  * Maps export settings to client-compatible settings
  */
 export function mapToClientSettings(settings: ExportSettings, fps: number): ClientExportSettings {
-  // Map codec to mediabunny codec
-  const codecMap: Record<ExportSettings['codec'], ClientCodec> = {
-    h264: 'avc',
-    h265: 'hevc',
-    vp8: 'vp8',
-    vp9: 'vp9',
-    prores: 'avc', // ProRes not supported client-side, fallback to H.264
-  };
-
-  // Map codec to container
-  const containerMap: Record<ClientCodec, ClientVideoContainer> = {
-    avc: 'mp4',
-    hevc: 'mp4',
-    vp8: 'webm',
-    vp9: 'webm',
-    av1: 'webm',
-  };
-
-  // Map quality to bitrate (in bits per second)
-  const bitrateMap: Record<ExportSettings['quality'], number> = {
-    low: 2_000_000, // 2 Mbps
-    medium: 5_000_000, // 5 Mbps
-    high: 10_000_000, // 10 Mbps
-    ultra: 20_000_000, // 20 Mbps
-  };
-
-  const codec = codecMap[settings.codec];
-  const container = containerMap[codec];
+  const codec = mapExportCodecToClientCodec(settings.codec);
+  const container = getPreferredContainerForCodec(codec);
 
   return {
     mode: 'video',
@@ -97,7 +162,7 @@ export function mapToClientSettings(settings: ExportSettings, fps: number): Clie
     quality: settings.quality,
     resolution: settings.resolution,
     fps,
-    videoBitrate: bitrateMap[settings.quality],
+    videoBitrate: getVideoBitrateForQuality(settings.quality),
     audioBitrate: 192_000, // 192 kbps
   };
 }
@@ -126,33 +191,21 @@ export function getDefaultAudioCodec(container: ClientContainer): ClientAudioCod
  * Check if a container is audio-only
  */
 function isAudioOnlyContainer(container: ClientContainer): container is ClientAudioContainer {
-  return ['mp3', 'wav', 'flac', 'aac'].includes(container);
+  return ['mp3', 'wav', 'aac'].includes(container);
 }
 
 /**
  * Check if a codec is supported by WebCodecs in this browser
  */
-async function isCodecSupported(codec: ClientCodec, width: number, height: number): Promise<boolean> {
-  if (!('VideoEncoder' in window)) {
-    return false;
-  }
-
-  const codecStrings: Record<ClientCodec, string> = {
-    avc: 'avc1.42E01E', // H.264 Baseline
-    hevc: 'hvc1.1.6.L93.B0', // HEVC Main
-    vp8: 'vp8',
-    vp9: 'vp09.00.10.08',
-    av1: 'av01.0.04M.08',
-  };
+async function isCodecSupported(codec: ClientCodec, options: CodecSupportCheckOptions): Promise<boolean> {
+  const { canEncodeVideo } = await getMediabunnyEncodeApi();
 
   try {
-    const support = await VideoEncoder.isConfigSupported({
-      codec: codecStrings[codec],
-      width,
-      height,
-      bitrate: 5_000_000,
+    return await canEncodeVideo(codec, {
+      width: options.width,
+      height: options.height,
+      bitrate: options.bitrate,
     });
-    return support.supported ?? false;
   } catch {
     return false;
   }
@@ -161,12 +214,18 @@ async function isCodecSupported(codec: ClientCodec, width: number, height: numbe
 /**
  * Get list of supported codecs for client-side rendering
  */
-export async function getSupportedCodecs(width: number, height: number): Promise<ClientCodec[]> {
+export async function getSupportedCodecs(
+  widthOrOptions: number | CodecSupportCheckOptions,
+  height?: number
+): Promise<ClientCodec[]> {
+  const options: CodecSupportCheckOptions = typeof widthOrOptions === 'number'
+    ? { width: widthOrOptions, height: height ?? 1080 }
+    : widthOrOptions;
   const codecs: ClientCodec[] = ['avc', 'hevc', 'vp8', 'vp9', 'av1'];
   const supported: ClientCodec[] = [];
 
   for (const codec of codecs) {
-    if (await isCodecSupported(codec, width, height)) {
+    if (await isCodecSupported(codec, options)) {
       supported.push(codec);
     }
   }
@@ -252,6 +311,20 @@ export function validateSettings(settings: ClientExportSettings): { valid: boole
     return { valid: false, error: 'Invalid frame rate (must be 1-120)' };
   }
 
+  if (settings.mode === 'audio') {
+    if (!isAudioOnlyContainer(settings.container)) {
+      return { valid: false, error: 'Audio export must use an audio-only container' };
+    }
+  } else {
+    if (isAudioOnlyContainer(settings.container)) {
+      return { valid: false, error: 'Video export must use a video container' };
+    }
+
+    if (!isVideoCodecCompatibleWithContainer(settings.codec, settings.container)) {
+      return { valid: false, error: `Codec ${settings.codec} is not supported in ${settings.container.toUpperCase()}` };
+    }
+  }
+
   // Auto-round odd dimensions to even (required by video codecs).
   // Mutates in place so the rest of the export pipeline sees clean values.
   if (settings.resolution.width % 2 !== 0) {
@@ -293,6 +366,17 @@ export function getAudioBitrateForQuality(quality: ClientExportSettings['quality
     high: 256_000, // 256 kbps
     ultra: 320_000, // 320 kbps
   };
+  return bitrateMap[quality];
+}
+
+export function getVideoBitrateForQuality(quality: ExportSettings['quality']): number {
+  const bitrateMap: Record<ExportSettings['quality'], number> = {
+    low: 2_000_000, // 2 Mbps
+    medium: 5_000_000, // 5 Mbps
+    high: 10_000_000, // 10 Mbps
+    ultra: 20_000_000, // 20 Mbps
+  };
+
   return bitrateMap[quality];
 }
 

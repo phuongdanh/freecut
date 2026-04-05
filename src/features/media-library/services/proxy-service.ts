@@ -16,6 +16,7 @@
 
 import { createLogger } from '@/shared/logging/logger';
 import { createManagedWorker } from '@/shared/utils/managed-worker';
+import { registerObjectUrl, unregisterObjectUrl } from '@/infrastructure/browser/object-url-registry';
 import { PROXY_DIR, PROXY_SCHEMA_VERSION } from '../proxy-constants';
 import type {
   ProxyWorkerRequest,
@@ -23,6 +24,11 @@ import type {
 } from '../workers/proxy-generation-worker';
 
 const logger = createLogger('ProxyService');
+
+function revokeRegisteredObjectUrl(url: string): void {
+  unregisterObjectUrl(url);
+  URL.revokeObjectURL(url);
+}
 
 const MIN_WIDTH_THRESHOLD = 1920;
 const MIN_HEIGHT_THRESHOLD = 1080;
@@ -207,7 +213,7 @@ class ProxyService {
 
     const previousSourceBlobUrl = this.sourceBlobUrlByProxyKey.get(resolvedProxyKey);
     if (previousSourceBlobUrl && previousSourceBlobUrl !== blobUrl) {
-      URL.revokeObjectURL(previousSourceBlobUrl);
+      revokeRegisteredObjectUrl(previousSourceBlobUrl);
     }
     this.sourceBlobUrlByProxyKey.set(resolvedProxyKey, blobUrl);
 
@@ -348,6 +354,7 @@ class ProxyService {
           if (proxyFile.size === 0) continue;
 
           const blobUrl = URL.createObjectURL(proxyFile);
+          registerObjectUrl(blobUrl, proxyFile);
           this.proxyBlobUrlByKey.set(proxyKey, blobUrl);
           this.emitStatusForProxyKey(proxyKey, 'ready');
 
@@ -422,10 +429,11 @@ class ProxyService {
 
       const previousBlobUrl = this.proxyBlobUrlByKey.get(proxyKey);
       if (previousBlobUrl) {
-        URL.revokeObjectURL(previousBlobUrl);
+        revokeRegisteredObjectUrl(previousBlobUrl);
       }
 
       const blobUrl = URL.createObjectURL(proxyFile);
+      registerObjectUrl(blobUrl, proxyFile);
       this.proxyBlobUrlByKey.set(proxyKey, blobUrl);
       this.emitStatusForProxyKey(proxyKey, 'ready');
 
@@ -471,7 +479,7 @@ class ProxyService {
             // Revoke stale cache entry for empty proxy file
             const oldUrl = this.proxyBlobUrlByKey.get(proxyKey);
             if (oldUrl) {
-              URL.revokeObjectURL(oldUrl);
+              revokeRegisteredObjectUrl(oldUrl);
             }
             this.proxyBlobUrlByKey.delete(proxyKey);
             continue;
@@ -480,18 +488,19 @@ class ProxyService {
           // Revoke old blob URL
           const oldUrl = this.proxyBlobUrlByKey.get(proxyKey);
           if (oldUrl) {
-            URL.revokeObjectURL(oldUrl);
+            revokeRegisteredObjectUrl(oldUrl);
           }
 
           // Create fresh blob URL from OPFS
           const freshUrl = URL.createObjectURL(proxyFile);
+          registerObjectUrl(freshUrl, proxyFile);
           this.proxyBlobUrlByKey.set(proxyKey, freshUrl);
           refreshed++;
         } catch {
           // Proxy file may have been deleted - remove stale cache entry
           const oldUrl = this.proxyBlobUrlByKey.get(proxyKey);
           if (oldUrl) {
-            URL.revokeObjectURL(oldUrl);
+            revokeRegisteredObjectUrl(oldUrl);
           }
           this.proxyBlobUrlByKey.delete(proxyKey);
         }
@@ -515,7 +524,7 @@ class ProxyService {
       return;
     }
 
-    URL.revokeObjectURL(sourceBlobUrl);
+    revokeRegisteredObjectUrl(sourceBlobUrl);
     this.sourceBlobUrlByProxyKey.delete(proxyKey);
   }
 

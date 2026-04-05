@@ -1,4 +1,4 @@
-﻿import { memo } from 'react';
+import { memo } from 'react';
 import { Link2Off, Diamond } from 'lucide-react';
 import { cn } from '@/shared/ui/cn';
 import { EDITOR_LAYOUT_CSS_VALUES } from '@/shared/ui/editor-layout';
@@ -76,7 +76,7 @@ export const ClipIndicators = memo(function ClipIndicators({
       {/* Missing media indicator */}
       {isBroken && hasMediaId && (
         <div
-          className="absolute bottom-1 left-1 p-0.5 rounded bg-destructive/90 text-destructive-foreground"
+          className="absolute bottom-1 right-1 p-0.5 rounded bg-destructive/90 text-destructive-foreground"
           title="Media file missing - relink in Media Library"
         >
           <Link2Off className="w-3 h-3" />

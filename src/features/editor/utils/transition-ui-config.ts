@@ -126,25 +126,47 @@ function generateConfigsFromRegistry(): PresentationConfig[] {
   ];
 }
 
-/** All presentation configs, generated once from the registry */
-export const TRANSITION_PRESENTATION_CONFIGS = generateConfigsFromRegistry();
+// Lazy-initialized caches — avoids TDZ when bundler orders this module
+// before the transition registry is populated (see CLAUDE.md gotchas).
+let _presentationConfigs: PresentationConfig[] | null = null;
+let _configsByCategory: Record<string, PresentationConfig[]> | null = null;
+let _categoryStartIndices: Record<string, number> | null = null;
 
-/** Configs grouped by category (for picker UIs) */
-export const TRANSITION_CONFIGS_BY_CATEGORY: Record<string, PresentationConfig[]> = {};
-/** Start indices per category (for flat-list indexing) */
-export const TRANSITION_CATEGORY_START_INDICES: Record<string, number> = {};
+function ensureInitialized(): void {
+  if (_presentationConfigs) return;
 
-{
-  for (const config of TRANSITION_PRESENTATION_CONFIGS) {
-    if (!TRANSITION_CONFIGS_BY_CATEGORY[config.category]) {
-      TRANSITION_CONFIGS_BY_CATEGORY[config.category] = [];
+  _presentationConfigs = generateConfigsFromRegistry();
+  _configsByCategory = {};
+  _categoryStartIndices = {};
+
+  for (const config of _presentationConfigs) {
+    if (!_configsByCategory[config.category]) {
+      _configsByCategory[config.category] = [];
     }
-    TRANSITION_CONFIGS_BY_CATEGORY[config.category]!.push(config);
+    _configsByCategory[config.category]!.push(config);
   }
 
   let running = 0;
   for (const category of TRANSITION_CATEGORY_ORDER) {
-    TRANSITION_CATEGORY_START_INDICES[category] = running;
-    running += (TRANSITION_CONFIGS_BY_CATEGORY[category]?.length || 0);
+    _categoryStartIndices[category] = running;
+    running += (_configsByCategory[category]?.length || 0);
   }
+}
+
+/** All presentation configs, generated once from the registry */
+export function getTransitionPresentationConfigs(): PresentationConfig[] {
+  ensureInitialized();
+  return _presentationConfigs!;
+}
+
+/** Configs grouped by category (for picker UIs) */
+export function getTransitionConfigsByCategory(): Record<string, PresentationConfig[]> {
+  ensureInitialized();
+  return _configsByCategory!;
+}
+
+/** Start indices per category (for flat-list indexing) */
+export function getTransitionCategoryStartIndices(): Record<string, number> {
+  ensureInitialized();
+  return _categoryStartIndices!;
 }

@@ -5,11 +5,16 @@ import type { TransformProperties } from '@/types/transform';
 import type { VisualEffect, ItemEffect } from '@/types/effects';
 import { clampTrimAmount, clampToAdjacentItems, calculateTrimSourceUpdate } from '../utils/trim-utils';
 import { getSourceProperties, isMediaItem, calculateSplitSourceBoundaries, timelineToSourceFrames, calculateSpeed, clampSpeed } from '../utils/source-calculations';
+import { getLinkedItems } from '../utils/linked-items';
+import { isCompositionWrapperItem, wouldCreateCompositionCycle } from '../utils/composition-graph';
 import { useCompositionNavigationStore } from './composition-navigation-store';
+import { useCompositionsStore } from './compositions-store';
 import { useTimelineSettingsStore } from './timeline-settings-store';
 import { useTransitionsStore } from './transitions-store';
+import { clampAudioFadeCurve, clampAudioFadeCurveX } from '@/shared/utils/audio-fade-curve';
+import { normalizeCropSettings } from '@/shared/utils/media-crop';
 
-const log = createLogger('ItemsStore');
+function getLog() { return createLogger('ItemsStore'); }
 
 function roundFrame(value: number, fallback = 0): number {
   if (!Number.isFinite(value)) return fallback;
@@ -42,6 +47,11 @@ function normalizeFrameFields<T extends TimelineItem>(item: T): T {
     sourceEnd: roundOptionalFrame(item.sourceEnd),
     sourceDuration: roundOptionalFrame(item.sourceDuration),
     sourceFps: normalizeOptionalFps(item.sourceFps),
+    crop: normalizeCropSettings(item.crop),
+    audioFadeInCurve: item.audioFadeInCurve === undefined ? undefined : clampAudioFadeCurve(item.audioFadeInCurve),
+    audioFadeOutCurve: item.audioFadeOutCurve === undefined ? undefined : clampAudioFadeCurve(item.audioFadeOutCurve),
+    audioFadeInCurveX: item.audioFadeInCurveX === undefined ? undefined : clampAudioFadeCurveX(item.audioFadeInCurveX),
+    audioFadeOutCurveX: item.audioFadeOutCurveX === undefined ? undefined : clampAudioFadeCurveX(item.audioFadeOutCurveX),
   };
 
   // Legacy split clips can have sourceEnd without sourceStart.
@@ -67,11 +77,25 @@ function normalizeItemUpdates(updates: Partial<TimelineItem>): Partial<TimelineI
   if (normalized.sourceEnd !== undefined) normalized.sourceEnd = roundFrame(normalized.sourceEnd);
   if (normalized.sourceDuration !== undefined) normalized.sourceDuration = roundFrame(normalized.sourceDuration);
   if (normalized.sourceFps !== undefined) normalized.sourceFps = normalizeOptionalFps(normalized.sourceFps);
+  if (normalized.crop !== undefined) normalized.crop = normalizeCropSettings(normalized.crop);
 
   // Keep legacy end-only bounds explicit and stable.
   if (normalized.sourceEnd !== undefined &&
       normalized.sourceStart === undefined) {
     normalized.sourceStart = 0;
+  }
+
+   if (normalized.audioFadeInCurve !== undefined) {
+    normalized.audioFadeInCurve = clampAudioFadeCurve(normalized.audioFadeInCurve);
+  }
+  if (normalized.audioFadeOutCurve !== undefined) {
+    normalized.audioFadeOutCurve = clampAudioFadeCurve(normalized.audioFadeOutCurve);
+  }
+  if (normalized.audioFadeInCurveX !== undefined) {
+    normalized.audioFadeInCurveX = clampAudioFadeCurveX(normalized.audioFadeInCurveX);
+  }
+  if (normalized.audioFadeOutCurveX !== undefined) {
+    normalized.audioFadeOutCurveX = clampAudioFadeCurveX(normalized.audioFadeOutCurveX);
   }
 
   return normalized;
@@ -164,6 +188,45 @@ function getTransitionLinkedIds(itemId: string): Set<string> {
     if (t.rightClipId === itemId) linkedIds.add(t.leftClipId);
   }
   return linkedIds;
+}
+
+function buildRippleShiftByItemId(items: TimelineItem[], deletedItems: TimelineItem[]): Map<string, number> {
+  const shiftByItemId = new Map<string, number>();
+
+  for (const item of items) {
+    let shiftAmount = 0;
+    for (const deletedItem of deletedItems) {
+      if (deletedItem.trackId === item.trackId && deletedItem.from + deletedItem.durationInFrames <= item.from) {
+        shiftAmount += deletedItem.durationInFrames;
+      }
+    }
+    shiftByItemId.set(item.id, shiftAmount);
+  }
+
+  const visited = new Set<string>();
+  for (const item of items) {
+    if (visited.has(item.id)) continue;
+
+    const linkedItems = getLinkedItems(items, item.id);
+    for (const linkedItem of linkedItems) {
+      visited.add(linkedItem.id);
+    }
+
+    if (linkedItems.length <= 1) continue;
+
+    let groupShift = 0;
+    for (const linkedItem of linkedItems) {
+      groupShift = Math.max(groupShift, shiftByItemId.get(linkedItem.id) ?? 0);
+    }
+
+    if (groupShift <= 0) continue;
+
+    for (const linkedItem of linkedItems) {
+      shiftByItemId.set(linkedItem.id, groupShift);
+    }
+  }
+
+  return shiftByItemId;
 }
 
 /**
@@ -277,15 +340,15 @@ export const useItemsStore = create<ItemsState & ItemsActions>()(
 
       if (itemsToDelete.length === 0) return state;
 
-      const newItems = state.items
-        .filter((i) => !idsToDelete.has(i.id))
-        .map((item) => {
-          const shiftAmount = itemsToDelete
-            .filter((d) => d.trackId === item.trackId && d.from + d.durationInFrames <= item.from)
-            .reduce((sum, d) => sum + d.durationInFrames, 0);
+      const remainingItems = state.items.filter((i) => !idsToDelete.has(i.id));
+      const shiftByItemId = buildRippleShiftByItemId(remainingItems, itemsToDelete);
 
-          return shiftAmount > 0 ? { ...item, from: item.from - shiftAmount } : item;
-        });
+      const newItems = remainingItems.map((item) => {
+        const shiftAmount = shiftByItemId.get(item.id) ?? 0;
+        return shiftAmount > 0
+          ? normalizeFrameFields({ ...item, from: item.from - shiftAmount })
+          : item;
+      });
 
       return withItemIndexes(newItems, state);
     }),
@@ -356,14 +419,25 @@ export const useItemsStore = create<ItemsState & ItemsActions>()(
       const state = get();
       const itemsMap = new Map(state.items.map((i) => [i.id, i]));
       const newItems: TimelineItem[] = [];
-      const isInsideSubComp = useCompositionNavigationStore.getState().activeCompositionId !== null;
+      const activeCompositionId = useCompositionNavigationStore.getState().activeCompositionId;
+      const compositionById = useCompositionsStore.getState().compositionById;
+      const linkedGroupMap = new Map<string, string>();
 
       for (let i = 0; i < itemIds.length; i++) {
         const original = itemsMap.get(itemIds[i]!);
         const position = positions[i]!;
         if (!original || !position) continue;
-        // Skip composition items when inside a sub-composition (1-level nesting limit)
-        if (isInsideSubComp && original.type === 'composition') continue;
+        if (
+          activeCompositionId !== null
+          && isCompositionWrapperItem(original)
+          && wouldCreateCompositionCycle({
+            parentCompositionId: activeCompositionId,
+            insertedCompositionId: original.compositionId,
+            compositionById,
+          })
+        ) {
+          continue;
+        }
 
         const duplicate = {
           ...original,
@@ -374,6 +448,10 @@ export const useItemsStore = create<ItemsState & ItemsActions>()(
           // Without this, split clips that are duplicated would be grouped with the originals,
           // causing incorrect sourceStart calculations (can result in negative values).
           originId: crypto.randomUUID(),
+          linkedGroupId: original.linkedGroupId
+            ? (linkedGroupMap.get(original.linkedGroupId)
+              ?? linkedGroupMap.set(original.linkedGroupId, crypto.randomUUID()).get(original.linkedGroupId))
+            : undefined,
         } as TimelineItem;
 
         newItems.push(normalizeFrameFields(duplicate));
@@ -452,7 +530,6 @@ export const useItemsStore = create<ItemsState & ItemsActions>()(
       const state = get();
       const item = state.items.find((i) => i.id === id);
       if (!item) return null;
-      if (item.type === 'composition') return null;
       const splitAt = roundFrame(splitFrame);
 
       const itemStart = roundFrame(item.from);
@@ -508,8 +585,8 @@ export const useItemsStore = create<ItemsState & ItemsActions>()(
         (rightItem as typeof item).sourceStart = boundaries.right.sourceStart;
         (rightItem as typeof item).sourceEnd = boundaries.right.sourceEnd;
 
-        log.debug(`_splitItem: Original sourceStart:${sourceStart} speed:${speed} leftDuration:${leftDuration} rightDuration:${rightDuration}`);
-        log.debug(`_splitItem: boundaries.right.sourceStart:${boundaries.right.sourceStart} rightItem.sourceStart:${(rightItem as typeof item).sourceStart}`);
+        getLog().debug(`_splitItem: Original sourceStart:${sourceStart} speed:${speed} leftDuration:${leftDuration} rightDuration:${rightDuration}`);
+        getLog().debug(`_splitItem: boundaries.right.sourceStart:${boundaries.right.sourceStart} rightItem.sourceStart:${(rightItem as typeof item).sourceStart}`);
       }
 
       set((state) => {
@@ -566,16 +643,16 @@ export const useItemsStore = create<ItemsState & ItemsActions>()(
     _rateStretchItem: (id, newFrom, newDuration, newSpeed) => set((state) => {
       const nextItems = state.items.map((item) => {
         if (item.id !== id) return item;
-        // Allow video, audio, and GIF images (detected by .gif extension)
+        // Allow video, audio, compositions, and GIF images (detected by .gif extension)
         const isGif = item.type === 'image' && item.label?.toLowerCase().endsWith('.gif');
-        if (item.type !== 'video' && item.type !== 'audio' && !isGif) return item;
+        if (item.type !== 'video' && item.type !== 'audio' && item.type !== 'composition' && !isGif) return item;
 
         // For clips with explicit source bounds (split clips and trimmed segments),
         // preserve sourceStart/sourceEnd exactly and only retime via speed+duration.
         // Recomputing sourceEnd here causes destructive source-span drift over repeated
         // rate-stretch operations.
         const hasExplicitSourceBounds =
-          (item.type === 'video' || item.type === 'audio') &&
+          (item.type === 'video' || item.type === 'audio' || item.type === 'composition') &&
           item.sourceEnd !== undefined;
 
         const sourceStart = item.sourceStart ?? 0;
@@ -806,4 +883,3 @@ useItemsStore.subscribe((state) => {
     mediaDependencyVersion: state.mediaDependencyVersion + 1,
   });
 });
-

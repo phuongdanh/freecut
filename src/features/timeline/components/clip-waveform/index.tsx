@@ -38,7 +38,7 @@ interface ClipWaveformProps {
 /**
  * Clip Waveform Component
  *
- * Renders audio waveform as a top-half thin-bar visualization for timeline clips.
+ * Renders audio waveform as a symmetrical mirrored visualization for timeline clips.
  * Uses tiled canvas for large clips and shows skeleton while loading.
  */
 export const ClipWaveform = memo(function ClipWaveform({
@@ -165,25 +165,23 @@ export const ClipWaveform = memo(function ClipWaveform({
       }
 
       const effectiveStart = sourceStart + trimStart;
-      const baselineY = height - WAVEFORM_VERTICAL_PADDING_PX;
-      const maxWaveHeight = Math.max(1, height - WAVEFORM_VERTICAL_PADDING_PX * 2);
+      const centerY = height / 2;
+      const maxWaveHeight = Math.max(1, (height / 2) - WAVEFORM_VERTICAL_PADDING_PX);
+      const amplitudes = new Array<number>(tileWidth + 1).fill(0);
 
-      // Build a single path tracing the peak contour per-pixel
       ctx.beginPath();
-      ctx.moveTo(0, baselineY);
+      ctx.moveTo(0, centerY);
 
       for (let x = 0; x <= tileWidth; x++) {
         const timelinePosition = (tileOffset + x) / pixelsPerSecond;
         const sourceTime = effectiveStart + (timelinePosition * speed);
 
         if (sourceTime < 0 || sourceTime > sourceDuration || sampleRate <= 0) {
-          ctx.lineTo(x, baselineY);
           continue;
         }
 
         const peakIndex = Math.floor(sourceTime * sampleRate);
         if (peakIndex < 0 || peakIndex >= peaks.length) {
-          ctx.lineTo(x, baselineY);
           continue;
         }
 
@@ -214,7 +212,6 @@ export const ClipWaveform = memo(function ClipWaveform({
         }
 
         if (sampleCount === 0) {
-          ctx.lineTo(x, baselineY);
           continue;
         }
 
@@ -227,12 +224,15 @@ export const ClipWaveform = memo(function ClipWaveform({
           normalizedMean * 0.38 + normalizedMax2 * 0.34 + needle * 2.35
         );
         const amp = peakValue <= 0.001 ? 0 : Math.pow(peakValue, 1.05);
-        const waveY = baselineY - amp * maxWaveHeight;
-        ctx.lineTo(x, waveY);
+        amplitudes[x] = amp * maxWaveHeight;
       }
 
-      // Close path back along the baseline
-      ctx.lineTo(tileWidth, baselineY);
+      for (let x = 0; x <= tileWidth; x++) {
+        ctx.lineTo(x, centerY - amplitudes[x]!);
+      }
+      for (let x = tileWidth; x >= 0; x--) {
+        ctx.lineTo(x, centerY + amplitudes[x]!);
+      }
       ctx.closePath();
 
       ctx.fillStyle = WAVEFORM_FILL_COLOR;

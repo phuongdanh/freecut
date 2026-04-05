@@ -216,7 +216,7 @@ export function createImportActions(
         set({
           error: isBrave
             ? 'File System Access API is disabled in Brave. Copy the URL below, paste it in your address bar, set the flag to Enabled, and relaunch.'
-            : 'File picker not supported. Please use Google Chrome.',
+            : 'File picker not supported in this browser. Use Chrome or Edge.',
           errorLink: isBrave ? 'brave://flags/#file-system-access-api' : null,
         });
         return [];

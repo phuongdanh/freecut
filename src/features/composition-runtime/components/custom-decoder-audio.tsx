@@ -1,6 +1,7 @@
 ﻿import React, { useEffect, useState } from 'react';
 import { PitchCorrectedAudio } from './pitch-corrected-audio';
 import { CustomDecoderBufferedAudio } from './custom-decoder-buffered-audio';
+import type { AudioPlaybackProps } from './audio-playback-props';
 import { getOrDecodeAudio } from '../utils/audio-decode-cache';
 import { createLogger } from '@/shared/logging/logger';
 import { getDecodedPreviewAudio } from '@/infrastructure/storage/indexeddb';
@@ -8,20 +9,9 @@ import type { DecodedPreviewAudioBin, DecodedPreviewAudioMeta } from '@/types/st
 
 const log = createLogger('CustomDecoderAudio');
 
-interface CustomDecoderAudioProps {
+interface CustomDecoderAudioProps extends AudioPlaybackProps {
   src: string;
   mediaId: string;
-  itemId: string;
-  trimBefore?: number;
-  sourceFps?: number;
-  volume?: number;
-  playbackRate?: number;
-  muted?: boolean;
-  durationInFrames: number;
-  audioFadeIn?: number;
-  audioFadeOut?: number;
-  crossfadeFadeIn?: number;
-  crossfadeFadeOut?: number;
 }
 
 interface DecodedWavEntry {
@@ -255,8 +245,18 @@ const CustomDecoderPitchPreservedAudio: React.FC<CustomDecoderAudioProps> = ({
   durationInFrames,
   audioFadeIn = 0,
   audioFadeOut = 0,
+  audioFadeInCurve = 0,
+  audioFadeOutCurve = 0,
+  audioFadeInCurveX = 0.52,
+  audioFadeOutCurveX = 0.52,
+  clipFadeSpans,
+  contentStartOffsetFrames,
+  contentEndOffsetFrames,
+  fadeInDelayFrames,
+  fadeOutLeadFrames,
   crossfadeFadeIn,
   crossfadeFadeOut,
+  volumeMultiplier = 1,
 }) => {
   const [decodedSrc, setDecodedSrc] = useState<string | null>(null);
 
@@ -297,8 +297,18 @@ const CustomDecoderPitchPreservedAudio: React.FC<CustomDecoderAudioProps> = ({
       durationInFrames={durationInFrames}
       audioFadeIn={audioFadeIn}
       audioFadeOut={audioFadeOut}
+      audioFadeInCurve={audioFadeInCurve}
+      audioFadeOutCurve={audioFadeOutCurve}
+      audioFadeInCurveX={audioFadeInCurveX}
+      audioFadeOutCurveX={audioFadeOutCurveX}
+      clipFadeSpans={clipFadeSpans}
+      contentStartOffsetFrames={contentStartOffsetFrames}
+      contentEndOffsetFrames={contentEndOffsetFrames}
+      fadeInDelayFrames={fadeInDelayFrames}
+      fadeOutLeadFrames={fadeOutLeadFrames}
       crossfadeFadeIn={crossfadeFadeIn}
       crossfadeFadeOut={crossfadeFadeOut}
+      volumeMultiplier={volumeMultiplier}
     />
   );
 };
@@ -322,4 +332,3 @@ export const CustomDecoderAudio: React.FC<CustomDecoderAudioProps> = React.memo(
 
   return <CustomDecoderPitchPreservedAudio {...props} playbackRate={playbackRate} />;
 });
-

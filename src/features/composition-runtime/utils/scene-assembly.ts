@@ -1,6 +1,7 @@
 import type {
   AdjustmentItem,
   AudioItem,
+  CompositionItem,
   ImageItem,
   ShapeItem,
   TextItem,
@@ -38,6 +39,7 @@ export interface AdjustmentLayerWithTrackOrderLike {
 export type VisualTrackItem = (VideoItem | ImageItem) & {
   zIndex: number;
   muted: boolean;
+  trackVolumeDb: number;
   trackOrder: number;
   trackVisible: boolean;
 };
@@ -46,6 +48,7 @@ export type VideoTrackItem = Extract<VisualTrackItem, { type: 'video' }>;
 
 export type AudioTrackItem = AudioItem & {
   muted: boolean;
+  trackVolumeDb: number;
   trackVisible: boolean;
 };
 
@@ -54,7 +57,7 @@ export type StableDomTrack = TimelineTrack & {
   items: Exclude<TimelineItem, VideoItem | AudioItem | AdjustmentItem>[];
 };
 
-export type TransitionClipItem = VideoItem | ImageItem;
+export type TransitionClipItem = VideoItem | ImageItem | CompositionItem;
 
 export type FrameRenderTask<TTransition> =
   | { type: 'item'; item: TimelineItem; trackOrder: number }
@@ -212,6 +215,7 @@ export function collectVisualTrackItems({
         ...item,
         zIndex: (maxOrder - (track.order ?? 0)) * 1000,
         muted: track.muted ?? false,
+        trackVolumeDb: track.volume ?? 0,
         trackOrder: track.order ?? 0,
         trackVisible: visibleTrackIds.has(track.id),
       }))
@@ -231,6 +235,7 @@ export function collectAudioTrackItems({
       .map((item) => ({
         ...item,
         muted: track.muted,
+        trackVolumeDb: track.volume ?? 0,
         trackVisible: visibleTrackIds.has(track.id),
       }))
   );
@@ -278,7 +283,7 @@ export function collectTransitionClipItems(
 ): TransitionClipItem[] {
   return tracks.flatMap((track) =>
     track.items.filter((item): item is TransitionClipItem => (
-      item.type === 'video' || item.type === 'image'
+      item.type === 'video' || item.type === 'image' || item.type === 'composition'
     ))
   );
 }
@@ -299,7 +304,7 @@ export function resolveTransitionWindowsForItems<TItem extends TimelineItem>(
   transitions: Transition[],
   items: TItem[],
 ): ResolvedTransitionWindow<TItem>[] {
-  return resolveTransitionWindows(transitions, buildItemIdMap(items));
+  return resolveTransitionWindows(transitions, buildItemIdMap(items)) as ResolvedTransitionWindow<TItem>[];
 }
 
 export function buildFrameRenderTasks<TTransition>({

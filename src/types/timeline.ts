@@ -1,4 +1,4 @@
-import type { TransformProperties } from './transform';
+import type { CropSettings, TransformProperties } from './transform';
 import type { ItemEffect } from './effects';
 import type { BlendMode } from './blend-modes';
 
@@ -10,7 +10,9 @@ type BaseTimelineItem = {
   durationInFrames: number; // Duration in frames (Composition convention)
   label: string;
   mediaId?: string;
+  compositionId?: string; // Reference to a sub-composition for compound wrappers
   originId?: string; // Tracks lineage - items from same split share this for stable React keys
+  linkedGroupId?: string; // Links paired timeline items like synced video/audio companions
   // Trim properties for media items
   trimStart?: number; // Frames trimmed from start of source media
   trimEnd?: number; // Frames trimmed from end of source media
@@ -21,10 +23,16 @@ type BaseTimelineItem = {
   speed?: number; // Playback speed multiplier (default 1.0, range 0.1-10.0)
   // Transform properties (optional - defaults computed at render time)
   transform?: TransformProperties;
+  // Source-relative media crop (normalized edge ratios)
+  crop?: CropSettings;
   // Audio properties (for video/audio items)
   volume?: number; // Volume in dB, -60 to +12 (default: 0)
   audioFadeIn?: number; // Audio fade in duration in seconds (default: 0)
   audioFadeOut?: number; // Audio fade out duration in seconds (default: 0)
+  audioFadeInCurve?: number; // Audio fade in curve shape (-1..1, default: 0 linear)
+  audioFadeOutCurve?: number; // Audio fade out curve shape (-1..1, default: 0 linear)
+  audioFadeInCurveX?: number; // Audio fade in curve horizontal bias (0..1, default: ~0.52)
+  audioFadeOutCurveX?: number; // Audio fade out curve horizontal bias (0..1, default: ~0.52)
   // Video properties (for video items)
   fadeIn?: number; // Video fade in duration in seconds (default: 0)
   fadeOut?: number; // Video fade out duration in seconds (default: 0)
@@ -55,6 +63,7 @@ export type VideoItem = BaseTimelineItem & {
   src: string;
   thumbnailUrl?: string;
   offset?: number; // Trim offset in source video
+  embeddedAudioMuted?: boolean; // Suppress embedded audio after unlinking from audio companion
   // Source dimensions (intrinsic size from media metadata)
   sourceWidth?: number;
   sourceHeight?: number;
@@ -156,11 +165,13 @@ export type TimelineItem = VideoItem | AudioItem | TextItem | ImageItem | ShapeI
 export interface TimelineTrack {
   id: string;
   name: string;
+  kind?: 'video' | 'audio';
   height: number;
   locked: boolean;
   visible: boolean; // Visual visibility (Eye icon)
   muted: boolean; // Audio muting (Volume icon)
   solo: boolean;
+  volume?: number; // Track gain in dB (default: 0)
   color?: string; // Optional - tracks are generic containers, items have colors
   order: number;
   items: TimelineItem[];

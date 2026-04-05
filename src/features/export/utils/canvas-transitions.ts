@@ -130,10 +130,12 @@ function clamp01(value: number): number {
 }
 
 function getFadeOpacity(progress: number, isOutgoing: boolean): number {
+  // cos²/sin² weights — always sum to 1, preserving alpha for soft crop & masks.
+  const c = Math.cos(progress * Math.PI / 2);
   if (isOutgoing) {
-    return Math.cos(progress * Math.PI / 2);
+    return c * c;
   }
-  return Math.sin(progress * Math.PI / 2);
+  return 1 - c * c;
 }
 
 function getFadeScale(progress: number, isOutgoing: boolean): number {
@@ -141,6 +143,22 @@ function getFadeScale(progress: number, isOutgoing: boolean): number {
     return 1 - (0.04 * progress);
   }
   return 1.04 - (0.04 * progress);
+}
+
+function drawFadeParticipant(
+  ctx: OffscreenCanvasRenderingContext2D,
+  source: OffscreenCanvas,
+  canvas: TransitionCanvasSettings,
+  scale: number,
+  alpha: number,
+): void {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.scale(scale, scale);
+  ctx.translate(-canvas.width / 2, -canvas.height / 2);
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
 }
 
 function drawScaledCanvas(
@@ -170,22 +188,25 @@ function renderFadeTransition(
   canvas: TransitionCanvasSettings
 ): void {
   const p = clamp01(progress);
-
-  drawScaledCanvas(
+  ctx.save();
+  ctx.globalCompositeOperation = 'copy';
+  drawFadeParticipant(
     ctx,
     rightCanvas,
     canvas,
     getFadeScale(p, false),
-    getFadeOpacity(p, false)
+    getFadeOpacity(p, false),
   );
 
-  drawScaledCanvas(
+  ctx.globalCompositeOperation = 'lighter';
+  drawFadeParticipant(
     ctx,
     leftCanvas,
     canvas,
     getFadeScale(p, true),
-    getFadeOpacity(p, true)
+    getFadeOpacity(p, true),
   );
+  ctx.restore();
 }
 
 function getWipeDirectionVector(direction: WipeDirection): { x: number; y: number } {

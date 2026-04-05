@@ -6,6 +6,20 @@
 
 import type { Project, ProjectTimeline } from '@/types/project';
 
+type BundleTimelineItem = Omit<ProjectTimeline['items'][number], 'mediaId'> & {
+  mediaRef?: string;
+  [key: string]: unknown;
+};
+
+type BundleComposition = Omit<NonNullable<ProjectTimeline['compositions']>[number], 'items'> & {
+  items: BundleTimelineItem[];
+};
+
+type BundleTimeline = Omit<ProjectTimeline, 'items' | 'compositions'> & {
+  items: BundleTimelineItem[];
+  compositions?: BundleComposition[];
+};
+
 // Bundle format version
 export const BUNDLE_VERSION = '1.0';
 
@@ -48,48 +62,9 @@ export interface BundleMediaEntry {
 /**
  * Project data in bundle (project.json)
  */
-export interface BundleProject extends Omit<Project, 'id'> {
+export interface BundleProject extends Omit<Project, 'id' | 'timeline'> {
   id: string; // Will be regenerated on import
-  timeline?: {
-    tracks: ProjectTimeline['tracks'];
-    items: Array<{
-      id: string;
-      trackId: string;
-      from: number;
-      durationInFrames: number;
-      label: string;
-      type: 'video' | 'audio' | 'text' | 'image' | 'shape' | 'composition' | 'adjustment';
-      mediaRef?: string; // References manifest.media[].originalId (renamed from mediaId)
-      // Other type-specific fields...
-      [key: string]: unknown;
-    }>;
-    currentFrame?: number;
-    zoomLevel?: number;
-    inPoint?: number;
-    outPoint?: number;
-    compositions?: Array<{
-      id: string;
-      name: string;
-      items: Array<{
-        id: string;
-        trackId: string;
-        from: number;
-        durationInFrames: number;
-        label: string;
-        type: 'video' | 'audio' | 'text' | 'image' | 'shape' | 'composition' | 'adjustment';
-        mediaRef?: string;
-        [key: string]: unknown;
-      }>;
-      tracks: ProjectTimeline['tracks'];
-      transitions?: ProjectTimeline['transitions'];
-      keyframes?: ProjectTimeline['keyframes'];
-      fps: number;
-      width: number;
-      height: number;
-      durationInFrames: number;
-      backgroundColor?: string;
-    }>;
-  };
+  timeline?: BundleTimeline;
 }
 
 /**

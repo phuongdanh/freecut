@@ -22,9 +22,10 @@ export interface MotionResult {
 const LK_WINDOW_RADIUS = 2;
 const LK_MIN_EIGENVALUE = 0.001;
 const SCENE_CUT_THRESHOLD = 8.0;
-const MAGNITUDE_THRESHOLD = 0.1;
-const COHERENCE_GLOBAL_THRESHOLD = 0.7;
-const STATS_BUFFER_SIZE = 48; // 12 x u32
+const COVERAGE_THRESHOLD = 0.7;
+const MAGNITUDE_THRESHOLD = 0.5;
+const COHERENCE_THRESHOLD = 0.6;
+const STATS_BUFFER_SIZE = 64; // 15 × u32 padded to 64 (matches masterselects)
 
 export class OpticalFlowAnalyzer {
   private device: GPUDevice;
@@ -56,6 +57,7 @@ export class OpticalFlowAnalyzer {
   private gradIyTextures: GPUTexture[] = [];
   private gradItTextures: GPUTexture[] = [];
   private flowTextures: GPUTexture[] = [];
+  private dummyFlowTexture!: GPUTexture;
 
   // Level dimensions for dispatch
   private levelDims: Array<{ w: number; h: number }> = [];
@@ -81,13 +83,33 @@ export class OpticalFlowAnalyzer {
     this.initialized = true;
   }
 
+  /** Check shader compilation for errors (dev diagnostic) */
+  async checkShaderCompilation(): Promise<boolean> {
+    const module = this.device.createShaderModule({
+      label: 'optical-flow-check',
+      code: OPTICAL_FLOW_WGSL,
+    });
+    const info = await module.getCompilationInfo();
+    const errors = info.messages.filter(m => m.type === 'error');
+    if (errors.length > 0) {
+      for (const err of errors) {
+        console.error(`[OpticalFlow] Shader error: ${err.message} (line ${err.lineNum}:${err.linePos})`);
+      }
+      return false;
+    }
+    return true;
+  }
+
   private createPipelines(): void {
     const module = this.device.createShaderModule({
       label: 'optical-flow',
       code: OPTICAL_FLOW_WGSL,
     });
 
-    // Grayscale
+    // r32float/rg32float textures are unfilterable — must declare sampleType
+    const r32Texture = { sampleType: 'unfilterable-float' as GPUTextureSampleType };
+
+    // Grayscale (input is rgba8unorm = filterable, output is storage write)
     this.grayscaleLayout = this.device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: {} },
@@ -99,10 +121,10 @@ export class OpticalFlowAnalyzer {
       compute: { module, entryPoint: 'grayscaleMain' },
     });
 
-    // Pyramid downsample
+    // Pyramid downsample (reads r32float)
     this.pyramidLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float' } },
       ],
     });
@@ -111,10 +133,10 @@ export class OpticalFlowAnalyzer {
       compute: { module, entryPoint: 'pyramidDownsampleMain' },
     });
 
-    // Spatial gradients
+    // Spatial gradients (reads r32float)
     this.spatialGradLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float' } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float' } },
       ],
@@ -124,11 +146,11 @@ export class OpticalFlowAnalyzer {
       compute: { module, entryPoint: 'spatialGradientsMain' },
     });
 
-    // Temporal gradient
+    // Temporal gradient (reads two r32float textures)
     this.temporalGradLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: {} },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float' } },
       ],
     });
@@ -137,14 +159,14 @@ export class OpticalFlowAnalyzer {
       compute: { module, entryPoint: 'temporalGradientMain' },
     });
 
-    // Lucas-Kanade
+    // Lucas-Kanade (reads r32float gradients + rg32float prev flow)
     this.lucasKanadeLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: {} },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: {} },
-        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: r32Texture },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rg32float' } },
-        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float' as GPUTextureSampleType } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
       ],
     });
@@ -153,10 +175,10 @@ export class OpticalFlowAnalyzer {
       compute: { module, entryPoint: 'lucasKanadeMain' },
     });
 
-    // Flow statistics
+    // Flow statistics (reads rg32float flow)
     this.flowStatsLayout = this.device.createBindGroupLayout({
       entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: {} },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float' as GPUTextureSampleType } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
       ],
@@ -182,7 +204,8 @@ export class OpticalFlowAnalyzer {
     return this.device.createTexture({
       size: { width: w, height: h },
       format,
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
+        | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
     });
   }
 
@@ -235,6 +258,13 @@ export class OpticalFlowAnalyzer {
       this.gradItTextures.push(this.createStorageTexture(dim.w, dim.h, 'r32float'));
       this.flowTextures.push(this.createStorageTexture(dim.w, dim.h, 'rg32float'));
     }
+
+    // 1×1 dummy flow texture for coarsest LK level (no previous flow to read)
+    this.dummyFlowTexture = this.device.createTexture({
+      size: { width: 1, height: 1 },
+      format: 'rg32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
   }
 
   private createBuffers(): void {
@@ -255,8 +285,8 @@ export class OpticalFlowAnalyzer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    const statsData = new Float32Array([MAGNITUDE_THRESHOLD, 0, 0, 0]);
-    this.device.queue.writeBuffer(this.statsParamsBuffer, 0, statsData.buffer);
+    const statsData = new Float32Array([MAGNITUDE_THRESHOLD, 0.0, 0.0, 0.0]);
+    this.device.queue.writeBuffer(this.statsParamsBuffer, 0, statsData);
   }
 
   private dispatch(encoder: GPUCommandEncoder, pipeline: GPUComputePipeline, bindGroup: GPUBindGroup, wx: number, wy: number): void {
@@ -369,14 +399,18 @@ export class OpticalFlowAnalyzer {
       });
       this.dispatch(encoder, this.temporalGradPipeline, temporalBG, dim.w, dim.h);
 
-      // Lucas-Kanade
-      const hasPrevFlow = level < PYRAMID_LEVELS - 1 ? 1 : 0;
-      const prevFlowLevel = Math.min(level + 1, PYRAMID_LEVELS - 1);
+      // Lucas-Kanade (matches masterselects exactly)
+      const pyramidScale = level < PYRAMID_LEVELS - 1 ? 2.0 : 0.0;
+      const prevFlowTexture = level < PYRAMID_LEVELS - 1
+        ? this.flowTextures[level + 1]!
+        : this.dummyFlowTexture;
+
       const lkData = new ArrayBuffer(16);
-      new Int32Array(lkData, 0, 1)[0] = LK_WINDOW_RADIUS;
-      new Float32Array(lkData, 4, 1)[0] = LK_MIN_EIGENVALUE;
-      new Float32Array(lkData, 8, 1)[0] = 2.0;
-      new Uint32Array(lkData, 12, 1)[0] = hasPrevFlow;
+      const lkView = new DataView(lkData);
+      lkView.setUint32(0, LK_WINDOW_RADIUS, true);
+      lkView.setFloat32(4, LK_MIN_EIGENVALUE, true);
+      lkView.setFloat32(8, pyramidScale, true);
+      lkView.setUint32(12, 0, true); // pad
       this.device.queue.writeBuffer(this.lkParamsBuffer, 0, lkData);
 
       const lkBG = this.device.createBindGroup({
@@ -386,7 +420,7 @@ export class OpticalFlowAnalyzer {
           { binding: 1, resource: this.gradIyTextures[level]!.createView() },
           { binding: 2, resource: this.gradItTextures[level]!.createView() },
           { binding: 3, resource: this.flowTextures[level]!.createView() },
-          { binding: 4, resource: this.flowTextures[prevFlowLevel]!.createView() },
+          { binding: 4, resource: prevFlowTexture.createView() },
           { binding: 5, resource: { buffer: this.lkParamsBuffer } },
         ],
       });
@@ -420,8 +454,17 @@ export class OpticalFlowAnalyzer {
   }
 
   private classifyMotion(data: Uint32Array): MotionResult {
-    const sumMag = data[0] ?? 0;
-    const pixelCount = data[3] ?? 0;
+    // Buffer layout matches masterselects FlowStats exactly:
+    // [0] sumMagnitude (×1000), [1] sumMagnitudeSq (×1000),
+    // [2] sumVx (i32, ×1000), [3] sumVy (i32, ×1000),
+    // [4] pixelCount, [5] significantPixels, [6] maxMagnitude (×1000),
+    // [7..14] direction histogram bins 0-7
+    const sumMagnitude = (data[0] ?? 0) / 1000;
+    const sumVx = new Int32Array([data[2] ?? 0])[0]! / 1000;
+    const sumVy = new Int32Array([data[3] ?? 0])[0]! / 1000;
+    const pixelCount = data[4] ?? 0;
+    const significantPixels = data[5] ?? 0;
+    const maxMagnitude = (data[6] ?? 0) / 1000;
 
     if (pixelCount === 0) {
       return {
@@ -430,29 +473,58 @@ export class OpticalFlowAnalyzer {
       };
     }
 
-    const totalMotion = (sumMag / pixelCount) / 1000;
+    const meanMagnitude = sumMagnitude / pixelCount;
 
-    // Direction histogram (bins at indices 4-11)
+    // Direction coherence (matches masterselects)
+    const meanVx = sumVx / pixelCount;
+    const meanVy = sumVy / pixelCount;
+    const meanVectorMagnitude = Math.sqrt(meanVx * meanVx + meanVy * meanVy);
+    const directionCoherence = meanMagnitude > 0.01 ? Math.min(1, meanVectorMagnitude / meanMagnitude) : 0;
+
+    // Coverage: fraction of ALL pixels with significant motion
+    const totalPixels = ANALYSIS_WIDTH * ANALYSIS_HEIGHT;
+    const coverageRatio = significantPixels / totalPixels;
+
+    // Scene cut detection (matches masterselects exactly — no coherence filter)
+    const isSceneCut = meanMagnitude > SCENE_CUT_THRESHOLD
+      && coverageRatio > COVERAGE_THRESHOLD;
+
+    // Normalize motion to 0-1 range
+    const normalizedMean = Math.min(1, meanMagnitude / 10);
+
+    let globalMotion: number;
+    let localMotion: number;
+
+    if (isSceneCut) {
+      globalMotion = normalizedMean;
+      localMotion = 0;
+    } else if (directionCoherence > COHERENCE_THRESHOLD) {
+      globalMotion = normalizedMean * directionCoherence;
+      localMotion = normalizedMean * (1 - directionCoherence);
+    } else {
+      const magnitudeVariance = ((data[1] ?? 0) / 1000) / pixelCount - meanMagnitude * meanMagnitude;
+      const varianceNorm = Math.min(1, Math.sqrt(Math.max(0, magnitudeVariance)) / 5);
+      globalMotion = normalizedMean * directionCoherence;
+      localMotion = Math.max(normalizedMean * (1 - directionCoherence), varianceNorm);
+    }
+
+    // Dominant direction from histogram
     const bins: number[] = [];
     for (let i = 0; i < 8; i++) {
-      bins.push(data[4 + i] ?? 0);
+      bins.push(data[7 + i] ?? 0);
     }
-    const totalBins = bins.reduce((a, b) => a + b, 0);
     const maxBin = Math.max(...bins);
     const maxBinIndex = bins.indexOf(maxBin);
-
     const dominantDirection = (maxBinIndex * 45 + 22.5) % 360;
-    const directionCoherence = totalBins > 0 ? maxBin / totalBins : 0;
 
-    const isGlobal = directionCoherence > COHERENCE_GLOBAL_THRESHOLD;
-    const globalMotion = isGlobal ? totalMotion : totalMotion * directionCoherence;
-    const localMotion = totalMotion - globalMotion;
+    // eslint-disable-next-line no-console
+    console.debug(`[OF] mean=${meanMagnitude.toFixed(2)} cov=${coverageRatio.toFixed(2)} coh=${directionCoherence.toFixed(2)} max=${maxMagnitude.toFixed(2)} cut=${isSceneCut}`);
 
     return {
-      totalMotion,
-      globalMotion,
-      localMotion,
-      isSceneCut: totalMotion > SCENE_CUT_THRESHOLD,
+      totalMotion: normalizedMean,
+      globalMotion: Math.min(1, globalMotion),
+      localMotion: Math.min(1, localMotion),
+      isSceneCut,
       dominantDirection,
       directionCoherence,
     };
@@ -486,6 +558,7 @@ export class OpticalFlowAnalyzer {
     for (const t of this.gradIyTextures) t.destroy();
     for (const t of this.gradItTextures) t.destroy();
     for (const t of this.flowTextures) t.destroy();
+    this.dummyFlowTexture.destroy();
     this.statsBuffer.destroy();
     this.stagingBuffer.destroy();
     this.lkParamsBuffer.destroy();

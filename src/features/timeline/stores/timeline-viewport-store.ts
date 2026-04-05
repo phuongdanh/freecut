@@ -1,14 +1,21 @@
 import { create } from 'zustand';
 
-interface TimelineViewportState {
+interface TimelineViewport {
   scrollLeft: number;
   scrollTop: number;
   viewportWidth: number;
   viewportHeight: number;
 }
 
+interface TimelineViewportState extends TimelineViewport {
+  pendingScrollToFrame: number | null;
+}
+
 interface TimelineViewportActions {
-  setViewport: (next: TimelineViewportState) => void;
+  setViewport: (next: TimelineViewport) => void;
+  /** Request the timeline container to scroll so `frame` is visible. */
+  requestScrollToFrame: (frame: number) => void;
+  clearScrollToFrame: () => void;
 }
 
 const EPSILON = 0.5;
@@ -22,7 +29,7 @@ const EPSILON = 0.5;
  */
 const SCROLL_THROTTLE_MS = 50;
 let lastScrollUpdate = 0;
-let pendingViewport: TimelineViewportState | null = null;
+let pendingViewport: TimelineViewport | null = null;
 let viewportThrottleTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /** Reset throttle state — for tests only. */
@@ -35,17 +42,18 @@ export function _resetViewportThrottle() {
   }
 }
 
-function isOnlyScrollChange(prev: TimelineViewportState, next: TimelineViewportState): boolean {
+function isOnlyScrollChange(prev: TimelineViewport, next: TimelineViewport): boolean {
   return Math.abs(prev.viewportWidth - next.viewportWidth) <= EPSILON
     && Math.abs(prev.viewportHeight - next.viewportHeight) <= EPSILON;
 }
 
-function hasMeaningfulChange(prev: TimelineViewportState, next: TimelineViewportState): boolean {
+function hasMeaningfulChange(prev: TimelineViewport, next: TimelineViewport): boolean {
   return Math.abs(prev.scrollLeft - next.scrollLeft) > EPSILON
     || Math.abs(prev.scrollTop - next.scrollTop) > EPSILON
     || Math.abs(prev.viewportWidth - next.viewportWidth) > EPSILON
     || Math.abs(prev.viewportHeight - next.viewportHeight) > EPSILON;
 }
+
 
 export const useTimelineViewportStore = create<TimelineViewportState & TimelineViewportActions>()(
   (set, get) => ({
@@ -53,6 +61,9 @@ export const useTimelineViewportStore = create<TimelineViewportState & TimelineV
     scrollTop: 0,
     viewportWidth: 0,
     viewportHeight: 0,
+    pendingScrollToFrame: null,
+    requestScrollToFrame: (frame: number) => set({ pendingScrollToFrame: frame }),
+    clearScrollToFrame: () => set({ pendingScrollToFrame: null }),
     setViewport: (next) => {
       const current = get();
       if (!hasMeaningfulChange(current, next)) {

@@ -1,5 +1,11 @@
 import { useRef, useEffect, useCallback, memo } from 'react';
 import { Button } from '@/components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { Slider } from '@/components/ui/slider';
 import {
   Film,
@@ -9,46 +15,60 @@ import {
   Magnet,
   Scissors,
   Gauge,
-  SplitSquareHorizontal,
-  MoveHorizontal,
   ArrowRightLeft,
   BetweenHorizontalEnd,
+  ChevronDown,
   X,
   MousePointer2,
   Undo2,
   Redo2,
   Flag,
   FlagOff,
-  LineChart,
   Activity,
+  Link2,
 } from 'lucide-react';
 import { Separator } from '@/components/ui/separator';
+import { formatHotkeyBinding } from '@/config/hotkeys';
 import { useTimelineZoom } from '../hooks/use-timeline-zoom';
 import { useTimelineStore } from '../stores/timeline-store';
 import { useTimelineCommandStore } from '../stores/timeline-command-store';
 import { usePlaybackStore } from '@/shared/state/playback';
+import { useEditorStore } from '@/shared/state/editor';
 import { useSelectionStore } from '@/shared/state/selection';
 import {
   ZOOM_FRICTION,
   ZOOM_MIN_VELOCITY,
   ZOOM_MIN,
   ZOOM_MAX,
+  SLIP_SLIDE_TOOLS_ENABLED,
 } from '../constants';
 import { EDITOR_LAYOUT_CSS_VALUES } from '@/shared/ui/editor-layout';
+import { useResolvedHotkeys } from '@/features/timeline/deps/settings';
 
 interface TimelineHeaderProps {
   onZoomChange?: (newZoom: number) => void;
   onZoomIn?: () => void;
   onZoomOut?: () => void;
   onZoomToFit?: () => void;
-  /** Whether the keyframe editor tab is active in the bottom editor panel */
-  isKeyframePanelOpen?: boolean;
-  /** Callback to toggle/open the keyframe editor tab */
-  onToggleKeyframePanel?: () => void;
   /** Whether the color scopes tab is active in the bottom editor panel */
   isScopesPanelOpen?: boolean;
   /** Callback to toggle/open the color scopes tab */
   onToggleScopesPanel?: () => void;
+}
+
+function TrimEditIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="10.6" y="4" width="2.8" height="16" rx="0.75" fill="currentColor" opacity="0.72" />
+      <path d="m9 7-6 5 6 5z" fill="currentColor" stroke="none" />
+      <path d="m15 7 6 5-6 5z" fill="currentColor" stroke="none" />
+    </svg>
+  );
 }
 
 /**
@@ -65,11 +85,10 @@ export const TimelineHeader = memo(function TimelineHeader({
   onZoomIn,
   onZoomOut,
   onZoomToFit,
-  isKeyframePanelOpen,
-  onToggleKeyframePanel,
   isScopesPanelOpen,
   onToggleScopesPanel,
 }: TimelineHeaderProps) {
+  const hotkeys = useResolvedHotkeys();
   const { zoomLevel, zoomIn, zoomOut, setZoom } = useTimelineZoom();
   const snapEnabled = useTimelineStore((s) => s.snapEnabled);
   const toggleSnap = useTimelineStore((s) => s.toggleSnap);
@@ -89,11 +108,16 @@ export const TimelineHeader = memo(function TimelineHeader({
   const setActiveTool = useSelectionStore((s) => s.setActiveTool);
   const selectedMarkerId = useSelectionStore((s) => s.selectedMarkerId);
   const clearSelection = useSelectionStore((s) => s.clearSelection);
+  const linkedSelectionEnabled = useEditorStore((s) => s.linkedSelectionEnabled);
+  const setLinkedSelectionEnabled = useEditorStore((s) => s.setLinkedSelectionEnabled);
   const canUndo = useTimelineCommandStore((s) => s.canUndo);
   const canRedo = useTimelineCommandStore((s) => s.canRedo);
   const undoLabel = useTimelineCommandStore((s) => s.getUndoLabel());
   const redoLabel = useTimelineCommandStore((s) => s.getRedoLabel());
 
+  const SlipSlideFlyoutIcon = activeTool === 'slide' ? BetweenHorizontalEnd : ArrowRightLeft;
+
+  const btnSize = { width: EDITOR_LAYOUT_CSS_VALUES.toolbarButtonSize, height: EDITOR_LAYOUT_CSS_VALUES.toolbarButtonSize } as const;
 
   // Momentum state for zoom slider
   const zoomVelocityRef = useRef(0);
@@ -230,26 +254,29 @@ export const TimelineHeader = memo(function TimelineHeader({
 
   return (
     <div
-      className="flex items-center justify-between px-3 border-b border-border"
+      className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-3"
       style={{ height: EDITOR_LAYOUT_CSS_VALUES.timelineHeaderHeight }}
       role="toolbar"
       aria-label="Timeline controls"
     >
-      {/* Left: Title & Tools */}
-      <div className="flex items-center gap-2.5">
+      {/* Left: Title */}
+      <div className="flex min-w-0 items-center gap-2.5">
         <h2 className="text-xs font-semibold tracking-wide uppercase text-muted-foreground flex items-center gap-2">
           <Film className="w-3 h-3" />
           Timeline
         </h2>
+      </div>
 
-        {/* Select/Razor Tools */}
-        <div className="flex items-center gap-1 px-1.5 py-1 bg-secondary/50 rounded-md border border-border">
+      {/* Middle: Timeline Controls */}
+      <div className="min-w-0 overflow-x-auto overflow-y-hidden">
+        <div className="flex w-max min-w-full items-center justify-center gap-2.5">
+        {/* Timeline Tools */}
+        <div className="flex items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'select' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
+            style={btnSize}
+            className={activeTool === 'select' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
             onClick={() => setActiveTool('select')}
             aria-label="Select tool"
             data-tooltip="Select Tool (V)"
@@ -260,9 +287,20 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'razor' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
+            style={btnSize}
+            className={activeTool === 'trim-edit' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
+            onClick={() => setActiveTool(activeTool === 'trim-edit' ? 'select' : 'trim-edit')}
+            aria-label="Trim edit tool"
+            data-tooltip="Trim Edit Tool (T)"
+          >
+            <TrimEditIcon className="w-3.5 h-3.5" />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            style={btnSize}
+            className={activeTool === 'razor' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
             onClick={() => setActiveTool(activeTool === 'razor' ? 'select' : 'razor')}
             aria-label="Razor tool"
             data-tooltip="Razor Tool (C)"
@@ -273,9 +311,8 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'rate-stretch' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
+            style={btnSize}
+            className={activeTool === 'rate-stretch' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
             onClick={() => setActiveTool(activeTool === 'rate-stretch' ? 'select' : 'rate-stretch')}
             aria-label="Rate stretch tool"
             data-tooltip="Rate Stretch Tool (R)"
@@ -283,57 +320,42 @@ export const TimelineHeader = memo(function TimelineHeader({
             <Gauge className="w-3.5 h-3.5" />
           </Button>
 
-          <Button
-            variant="ghost"
-            size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'rolling-edit' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
-            onClick={() => setActiveTool(activeTool === 'rolling-edit' ? 'select' : 'rolling-edit')}
-            aria-label="Rolling edit tool"
-            data-tooltip="Rolling Edit Tool (N)"
-          >
-            <SplitSquareHorizontal className="w-3.5 h-3.5" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'ripple-edit' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
-            onClick={() => setActiveTool(activeTool === 'ripple-edit' ? 'select' : 'ripple-edit')}
-            aria-label="Ripple edit tool"
-            data-tooltip="Ripple Edit Tool (B)"
-          >
-            <MoveHorizontal className="w-3.5 h-3.5" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'slip' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
-            onClick={() => setActiveTool(activeTool === 'slip' ? 'select' : 'slip')}
-            aria-label="Slip tool"
-            data-tooltip="Slip Tool (Y)"
-          >
-            <ArrowRightLeft className="w-3.5 h-3.5" />
-          </Button>
-
-          <Button
-            variant="ghost"
-            size="icon"
-            className={`h-7 w-7 ${
-              activeTool === 'slide' ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-            }`}
-            onClick={() => setActiveTool(activeTool === 'slide' ? 'select' : 'slide')}
-            aria-label="Slide tool"
-            data-tooltip="Slide Tool (U)"
-          >
-            <BetweenHorizontalEnd className="w-3.5 h-3.5" />
-          </Button>
+          {SLIP_SLIDE_TOOLS_ENABLED ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  style={{ height: EDITOR_LAYOUT_CSS_VALUES.toolbarButtonSize }}
+                  className={`gap-1 px-2 ${
+                    activeTool === 'slip' || activeTool === 'slide'
+                      ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                      : ''
+                  }`}
+                  aria-label="Slip and slide tools"
+                  data-tooltip="Slip / Slide Tools"
+                >
+                  <span className="flex items-center gap-1">
+                    <span className="inline-flex items-center justify-center">
+                      <SlipSlideFlyoutIcon className="w-3.5 h-3.5" />
+                    </span>
+                    <ChevronDown className="w-3 h-3 opacity-70" />
+                  </span>
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start">
+                <DropdownMenuItem onClick={() => setActiveTool(activeTool === 'slip' ? 'select' : 'slip')}>
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  <span className="flex-1">Slip tool</span>
+                  <span className="text-xs text-muted-foreground">{formatHotkeyBinding(hotkeys.SLIP_TOOL)}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => setActiveTool(activeTool === 'slide' ? 'select' : 'slide')}>
+                  <BetweenHorizontalEnd className="w-3.5 h-3.5" />
+                  <span className="flex-1">Slide tool</span>
+                  <span className="text-xs text-muted-foreground">{formatHotkeyBinding(hotkeys.SLIDE_TOOL)}</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
         </div>
 
         <Separator orientation="vertical" className="h-5 mx-1.5" />
@@ -343,7 +365,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={handleUndo}
             disabled={!canUndo}
             aria-label={undoLabel ? `Undo ${undoLabel}` : 'Undo'}
@@ -355,7 +377,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={handleRedo}
             disabled={!canRedo}
             aria-label={redoLabel ? `Redo ${redoLabel}` : 'Redo'}
@@ -372,7 +394,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={() => setInPoint(usePlaybackStore.getState().currentFrame)}
             aria-label="Set in point"
             data-tooltip="Set In Point (I)"
@@ -383,7 +405,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={() => setOutPoint(usePlaybackStore.getState().currentFrame)}
             aria-label="Set out point"
             data-tooltip="Set Out Point (O)"
@@ -394,7 +416,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={clearInOutPoints}
             disabled={inPoint === null && outPoint === null}
             aria-label="Clear in and out points"
@@ -411,7 +433,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={() => addMarker(usePlaybackStore.getState().currentFrame)}
             aria-label="Add marker"
             data-tooltip="Add Marker (M)"
@@ -422,7 +444,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={() => {
               if (selectedMarkerId) {
                 removeMarker(selectedMarkerId);
@@ -439,7 +461,7 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Button
             variant="ghost"
             size="icon"
-            className="h-7 w-7"
+            style={btnSize}
             onClick={clearAllMarkers}
             disabled={!hasMarkers}
             aria-label="Clear all markers"
@@ -455,9 +477,8 @@ export const TimelineHeader = memo(function TimelineHeader({
         <Button
           variant="ghost"
           size="icon"
-          className={`h-7 w-7 ${
-            snapEnabled ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-          }`}
+          style={btnSize}
+          className={snapEnabled ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
           onClick={toggleSnap}
           aria-label={snapEnabled ? 'Disable snapping' : 'Enable snapping'}
           data-tooltip={snapEnabled ? 'Snap Enabled' : 'Snap Disabled'}
@@ -471,36 +492,37 @@ export const TimelineHeader = memo(function TimelineHeader({
         <Button
           variant="ghost"
           size="icon"
-          className={`h-7 w-7 ${
-            isKeyframePanelOpen ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-          }`}
-          onClick={onToggleKeyframePanel}
-          aria-label={isKeyframePanelOpen ? 'Hide keyframe editor' : 'Show keyframe editor'}
-          data-tooltip={isKeyframePanelOpen ? 'Hide Keyframe Editor' : 'Show Keyframe Editor'}
-        >
-          <LineChart className="w-3.5 h-3.5" />
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="icon"
-          className={`h-7 w-7 ${
-            isScopesPanelOpen ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''
-          }`}
+          style={btnSize}
+          className={isScopesPanelOpen ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
           onClick={onToggleScopesPanel}
           aria-label={isScopesPanelOpen ? 'Hide color scopes' : 'Show color scopes'}
           data-tooltip={isScopesPanelOpen ? 'Hide Color Scopes' : 'Show Color Scopes'}
         >
           <Activity className="w-3.5 h-3.5" />
         </Button>
-      </div>
 
-      {/* Right: Zoom Controls */}
-      <div className="flex items-center gap-1.5">
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          style={btnSize}
+          className={linkedSelectionEnabled ? 'bg-primary text-primary-foreground hover:bg-primary/90' : ''}
+          onClick={() => setLinkedSelectionEnabled(!linkedSelectionEnabled)}
+          aria-label={linkedSelectionEnabled ? 'Disable linked selection' : 'Enable linked selection'}
+          aria-pressed={linkedSelectionEnabled}
+          data-tooltip={`${linkedSelectionEnabled ? 'Linked Selection On' : 'Linked Selection Off'} (${formatHotkeyBinding(hotkeys.TOGGLE_LINKED_SELECTION)})`}
+        >
+          <Link2 className="w-3.5 h-3.5" />
+        </Button>
+
+        </div>
+      </div>
+
+      {/* Right: Zoom Controls */}
+      <div className="flex items-center justify-end gap-1.5">
+        <Button
+          variant="ghost"
+          size="icon"
+          style={btnSize}
           onClick={() => {
             if (onZoomOut) {
               onZoomOut();
@@ -528,7 +550,7 @@ export const TimelineHeader = memo(function TimelineHeader({
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          style={btnSize}
           onClick={() => {
             if (onZoomIn) {
               onZoomIn();
@@ -545,7 +567,7 @@ export const TimelineHeader = memo(function TimelineHeader({
         <Button
           variant="ghost"
           size="icon"
-          className="h-7 w-7"
+          style={btnSize}
           onClick={onZoomToFit}
           aria-label="Zoom to fit"
           data-tooltip="Zoom to Fit (Z)"
@@ -553,9 +575,6 @@ export const TimelineHeader = memo(function TimelineHeader({
           <Maximize2 className="w-3.5 h-3.5" />
         </Button>
 
-        <span className="text-xs text-muted-foreground font-mono w-12 text-right">
-          {Math.round(zoomLevel * 100)}%
-        </span>
       </div>
     </div>
   );

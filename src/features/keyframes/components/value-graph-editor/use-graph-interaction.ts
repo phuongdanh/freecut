@@ -12,7 +12,9 @@ import type {
   GraphDragState,
   GraphBezierHandle,
 } from './types';
+import { PROPERTY_VALUE_RANGES } from './types';
 import type { KeyframeRef, BezierControlPoints } from '@/types/keyframe';
+import { getBezierPresetForEasing } from '@/features/keyframes/utils/easing-presets';
 import { updateBezierFromHandle } from './bezier-utils';
 import type { BlockedFrameRange } from '../../utils/transition-region';
 import {
@@ -25,6 +27,8 @@ const DRAG_THRESHOLD = 3;
 
 /** Snap threshold in pixels - keyframes snap when within this distance */
 const SNAP_THRESHOLD_PX = 8;
+const FRAME_ZOOM_IN_FACTOR = 0.8;
+const FRAME_ZOOM_OUT_FACTOR = 1.25;
 
 /** Drag start state stored in ref to avoid stale closures */
 interface DragStartState {
@@ -40,7 +44,30 @@ interface DragStartState {
     property: GraphKeyframePoint['property'];
     frame: number;
     value: number;
+    minValue: number;
+    maxValue: number;
   }>;
+  duplicateOnCommit: boolean;
+}
+
+/** Info about the adjacent segment for mid-point tangent mirroring */
+interface AdjacentSegmentInfo {
+  /** Keyframe ID that owns the adjacent bezier config */
+  keyframeId: string;
+  /** Item ID */
+  itemId: string;
+  /** Property */
+  property: GraphKeyframePoint['property'];
+  /** Which bezier component to update on the adjacent segment */
+  handleType: 'in' | 'out';
+  /** Start point of the adjacent segment (in screen coords) */
+  startPoint: GraphKeyframePoint;
+  /** End point of the adjacent segment (in screen coords) */
+  endPoint: GraphKeyframePoint;
+  /** Initial bezier config of the adjacent keyframe */
+  initialBezier: BezierControlPoints;
+  /** Initial distance from mid-point to opposite handle */
+  initialLength: number;
 }
 
 /** Bezier drag start state */
@@ -53,6 +80,10 @@ interface BezierDragStartState {
   startPoint: GraphKeyframePoint;
   endPoint: GraphKeyframePoint;
   initialBezier: BezierControlPoints;
+  /** Adjacent segment info for mid-point tangent mirroring (null if endpoint) */
+  adjacent: AdjacentSegmentInfo | null;
+  /** The mid-point position (screen coords) — anchor of the dragged handle */
+  midPoint: { x: number; y: number };
 }
 
 type MarqueeMode = 'replace' | 'add' | 'toggle';
@@ -110,8 +141,14 @@ interface UseGraphInteractionOptions {
   onViewportChange?: (viewport: GraphViewport) => void;
   /** Callback when keyframe selection changes */
   onSelectionChange?: (keyframeIds: Set<string>) => void;
+  /** Callback when clicking empty graph space */
+  onBackgroundClick?: () => void;
   /** Callback when keyframe is moved */
   onKeyframeMove?: (ref: KeyframeRef, newFrame: number, newValue: number) => void;
+  /** Callback when keyframes are duplicated to explicit targets */
+  onDuplicateKeyframes?: (entries: Array<{ ref: KeyframeRef; frame: number; value: number }>) => void;
+  /** Optional frame-delta constraint for horizontal drags */
+  constrainFrameDelta?: (deltaFrames: number, draggedKeyframeIds: string[]) => number;
   /** Callback when bezier handle is moved */
   onBezierHandleMove?: (ref: KeyframeRef, bezier: BezierControlPoints) => void;
   /** Callback when drag starts (for undo batching) */
@@ -139,6 +176,8 @@ interface UseGraphInteractionReturn {
   previewValues: Record<string, { frame: number; value: number }> | null;
   /** Currently dragging handle info */
   draggingHandle: { keyframeId: string; type: 'in' | 'out' } | null;
+  /** Preview bezier configs during handle drag (avoids store updates until pointer up) */
+  previewBezierConfigs: Record<string, BezierControlPoints> | null;
   /** Current constraint axis when Shift is held ('x' = frame only, 'y' = value only, null = no constraint) */
   constraintAxis: 'x' | 'y' | null;
   /** Handle keyframe pointer down */
@@ -157,6 +196,8 @@ interface UseGraphInteractionReturn {
   handleBackgroundPointerDown: (event: React.PointerEvent<SVGElement>) => void;
   /** Handle graph background click (deselect) */
   handleBackgroundClick: (event: React.MouseEvent<SVGElement>) => void;
+  /** Timestamp of last keyframe/handle pointerDown (for click dedup) */
+  lastInteractionTime: React.RefObject<number>;
   /** Active marquee rect while selecting */
   marqueeRect: KeyframeMarqueeRect | null;
   /** Zoom in */
@@ -180,7 +221,10 @@ export function useGraphInteraction({
   maxValue: clampMaxValue,
   onViewportChange,
   onSelectionChange,
+  onBackgroundClick,
   onKeyframeMove,
+  onDuplicateKeyframes,
+  constrainFrameDelta,
   onBezierHandleMove,
   onDragStart,
   onDragEnd,
@@ -195,6 +239,7 @@ export function useGraphInteraction({
   const [isPendingDrag, setIsPendingDrag] = useState(false);
   const [previewValues, setPreviewValues] = useState<Record<string, { frame: number; value: number }> | null>(null);
   const [draggingHandle, setDraggingHandle] = useState<{ keyframeId: string; type: 'in' | 'out' } | null>(null);
+  const [previewBezierConfigs, setPreviewBezierConfigs] = useState<Record<string, BezierControlPoints> | null>(null);
   const [constraintAxis, setConstraintAxis] = useState<'x' | 'y' | null>(null);
   const [marqueeRect, setMarqueeRect] = useState<KeyframeMarqueeRect | null>(null);
 
@@ -212,15 +257,24 @@ export function useGraphInteraction({
   useEffect(() => {
     previewValuesRef.current = previewValues;
   }, [previewValues]);
+  const previewBezierConfigsRef = useRef<Record<string, BezierControlPoints> | null>(null);
+  useEffect(() => {
+    previewBezierConfigsRef.current = previewBezierConfigs;
+  }, [previewBezierConfigs]);
 
   // Ref for latest callbacks to avoid stale closures
-  const callbacksRef = useRef({ onKeyframeMove, onBezierHandleMove, onSelectionChange, onViewportChange, onDragStart, onDragEnd });
+  const callbacksRef = useRef({ onKeyframeMove, onDuplicateKeyframes, onBezierHandleMove, onSelectionChange, onViewportChange, onBackgroundClick, onDragStart, onDragEnd });
   useEffect(() => {
-    callbacksRef.current = { onKeyframeMove, onBezierHandleMove, onSelectionChange, onViewportChange, onDragStart, onDragEnd };
-  }, [onKeyframeMove, onBezierHandleMove, onSelectionChange, onViewportChange, onDragStart, onDragEnd]);
+    callbacksRef.current = { onKeyframeMove, onDuplicateKeyframes, onBezierHandleMove, onSelectionChange, onViewportChange, onBackgroundClick, onDragStart, onDragEnd };
+  }, [onKeyframeMove, onDuplicateKeyframes, onBezierHandleMove, onSelectionChange, onViewportChange, onBackgroundClick, onDragStart, onDragEnd]);
 
   // Track whether we've called onDragStart for the current drag operation
   const dragStartCalledRef = useRef(false);
+
+  // Timestamp of last keyframe/handle interaction (used to ignore click events
+  // that fire on the SVG after pointer capture redirects them away from the original target)
+  const lastInteractionTimeRef = useRef(0);
+
 
   // Memoized graph dimensions
   const graphDimensions = useMemo(() => {
@@ -530,6 +584,7 @@ export function useGraphInteraction({
 
       event.preventDefault();
       event.stopPropagation();
+      lastInteractionTimeRef.current = Date.now();
 
       // Capture pointer on the SVG element (not the keyframe itself)
       const svg = event.currentTarget.closest('svg');
@@ -553,12 +608,17 @@ export function useGraphInteraction({
       const initialKeyframeStates = new Map(
         pointsForDrag.map((dragPoint) => [
           dragPoint.keyframe.id,
-          {
-            itemId: dragPoint.itemId,
-            property: dragPoint.property,
-            frame: dragPoint.keyframe.frame,
-            value: dragPoint.keyframe.value,
-          },
+          (() => {
+            const range = PROPERTY_VALUE_RANGES[dragPoint.property];
+            return {
+              itemId: dragPoint.itemId,
+              property: dragPoint.property,
+              frame: dragPoint.keyframe.frame,
+              value: dragPoint.keyframe.value,
+              minValue: range.min,
+              maxValue: range.max,
+            };
+          })(),
         ])
       );
 
@@ -572,6 +632,7 @@ export function useGraphInteraction({
         pointerId: event.pointerId,
         point,
         initialKeyframeStates,
+        duplicateOnCommit: !!onDuplicateKeyframes && event.altKey,
       };
 
       setIsPendingDrag(true);
@@ -624,11 +685,12 @@ export function useGraphInteraction({
 
       event.preventDefault();
       event.stopPropagation();
+      lastInteractionTimeRef.current = Date.now();
 
       const point = points.find((p) => p.keyframe.id === handle.keyframeId);
       if (!point) return;
 
-      const bezier = point.keyframe.easingConfig?.bezier;
+      const bezier = point.keyframe.easingConfig?.bezier ?? getBezierPresetForEasing(point.keyframe.easing);
       if (!bezier) return;
 
       // Find start and end points for this segment
@@ -646,6 +708,64 @@ export function useGraphInteraction({
         svgRef.current = svg as SVGSVGElement;
       }
 
+      // Determine mid-point and adjacent segment for tangent mirroring
+      let adjacent: AdjacentSegmentInfo | null = null;
+      let midPoint: { x: number; y: number };
+
+      if (handle.type === 'out') {
+        // Anchor (mid-point) is startPoint; adjacent is the previous segment ending at startPoint
+        midPoint = { x: startPoint!.x, y: startPoint!.y };
+        const prevPoint = pointIndex > 0 ? sortedPoints[pointIndex - 1] : undefined;
+        if (prevPoint) {
+          const adjBezier = prevPoint.keyframe.easingConfig?.bezier ?? getBezierPresetForEasing(prevPoint.keyframe.easing);
+          if (adjBezier) {
+            // Opposite handle is the 'in' handle of prev segment (x2, y2), anchored at startPoint
+            const segW = startPoint!.x - prevPoint.x;
+            const segH = startPoint!.y - prevPoint.y;
+            const oppX = prevPoint.x + adjBezier.x2 * segW;
+            const oppY = prevPoint.y + adjBezier.y2 * segH;
+            const dx = oppX - midPoint.x;
+            const dy = oppY - midPoint.y;
+            adjacent = {
+              keyframeId: prevPoint.keyframe.id,
+              itemId: prevPoint.itemId,
+              property: prevPoint.property,
+              handleType: 'in',
+              startPoint: prevPoint,
+              endPoint: startPoint!,
+              initialBezier: { ...adjBezier },
+              initialLength: Math.hypot(dx, dy),
+            };
+          }
+        }
+      } else {
+        // handle.type === 'in': anchor (mid-point) is endPoint; adjacent is the next segment starting at endPoint
+        midPoint = { x: endPoint!.x, y: endPoint!.y };
+        const nextNextPoint = pointIndex + 2 < sortedPoints.length ? sortedPoints[pointIndex + 2] : undefined;
+        if (nextNextPoint) {
+          const adjBezier = endPoint!.keyframe.easingConfig?.bezier ?? getBezierPresetForEasing(endPoint!.keyframe.easing);
+          if (adjBezier) {
+            // Opposite handle is the 'out' handle of next segment (x1, y1), anchored at endPoint
+            const segW = nextNextPoint.x - endPoint!.x;
+            const segH = nextNextPoint.y - endPoint!.y;
+            const oppX = endPoint!.x + adjBezier.x1 * segW;
+            const oppY = endPoint!.y + adjBezier.y1 * segH;
+            const dx = oppX - midPoint.x;
+            const dy = oppY - midPoint.y;
+            adjacent = {
+              keyframeId: endPoint!.keyframe.id,
+              itemId: endPoint!.itemId,
+              property: endPoint!.property,
+              handleType: 'out',
+              startPoint: endPoint!,
+              endPoint: nextNextPoint,
+              initialBezier: { ...adjBezier },
+              initialLength: Math.hypot(dx, dy),
+            };
+          }
+        }
+      }
+
       bezierDragStartRef.current = {
         mouseX: event.clientX,
         mouseY: event.clientY,
@@ -655,6 +775,8 @@ export function useGraphInteraction({
         startPoint: startPoint!,
         endPoint: endPoint!,
         initialBezier: { ...bezier },
+        adjacent,
+        midPoint,
       };
 
       // Call onDragStart for bezier handle drag (no threshold, starts immediately)
@@ -738,8 +860,7 @@ export function useGraphInteraction({
         const graphWidth = viewport.width - padding.left - padding.right;
         const graphHeight = viewport.height - padding.top - padding.bottom;
         const frameRange = viewport.endFrame - viewport.startFrame;
-        const valueRange = viewport.maxValue - viewport.minValue;
-
+        const valueRange = Math.max(0.0001, viewport.maxValue - viewport.minValue);
         const dx = event.clientX - mouseX;
         const dy = event.clientY - mouseY;
 
@@ -747,7 +868,7 @@ export function useGraphInteraction({
         if (!isDragging && (Math.abs(dx) > DRAG_THRESHOLD || Math.abs(dy) > DRAG_THRESHOLD)) {
           setIsDragging(true);
           // Call onDragStart when we first exceed threshold
-          if (!dragStartCalledRef.current) {
+          if (!dragStartCalledRef.current && !dragStartRef.current.duplicateOnCommit) {
             dragStartCalledRef.current = true;
             callbacksRef.current.onDragStart?.();
           }
@@ -762,7 +883,7 @@ export function useGraphInteraction({
         let valueDelta = -(dy / graphHeight) * valueRange;
 
         // Alt = fine adjustment (half speed)
-        if (event.altKey) {
+        if (event.altKey && !dragStartRef.current.duplicateOnCommit) {
           frameDelta *= 0.5;
           valueDelta *= 0.5;
         }
@@ -791,12 +912,7 @@ export function useGraphInteraction({
         }
 
         // Bounds checking - clamp to valid value range
-        if (clampMinValue !== undefined) {
-          newValue = Math.max(clampMinValue, newValue);
-        }
-        if (clampMaxValue !== undefined) {
-          newValue = Math.min(clampMaxValue, newValue);
-        }
+        newValue = Math.max(anchorInitialState.minValue, Math.min(anchorInitialState.maxValue, newValue));
 
         // Apply snapping if enabled (but not when Ctrl is held to temporarily disable)
         if (snapEnabled && !event.ctrlKey && !event.metaKey) {
@@ -812,6 +928,11 @@ export function useGraphInteraction({
         // Prevent dragging into blocked (transition) regions
         newFrame = clampToAvoidBlockedRanges(newFrame, anchorInitialState.frame);
 
+        const constrainedFrameDelta = constrainFrameDelta
+          ? constrainFrameDelta(newFrame - anchorInitialState.frame, Array.from(initialKeyframeStates.keys()))
+          : newFrame - anchorInitialState.frame;
+        newFrame = anchorInitialState.frame + constrainedFrameDelta;
+
         const appliedFrameDelta = newFrame - anchorInitialState.frame;
         const appliedValueDelta = newValue - anchorInitialState.value;
         const nextPreviewValues: Record<string, { frame: number; value: number }> = {};
@@ -825,12 +946,7 @@ export function useGraphInteraction({
           nextFrame = clampToAvoidBlockedRanges(nextFrame, initialState.frame);
 
           let nextValue = initialState.value + appliedValueDelta;
-          if (clampMinValue !== undefined) {
-            nextValue = Math.max(clampMinValue, nextValue);
-          }
-          if (clampMaxValue !== undefined) {
-            nextValue = Math.min(clampMaxValue, nextValue);
-          }
+          nextValue = Math.max(initialState.minValue, Math.min(initialState.maxValue, nextValue));
 
           nextPreviewValues[keyframeId] = { frame: nextFrame, value: nextValue };
         }
@@ -839,9 +955,9 @@ export function useGraphInteraction({
         return;
       }
 
-      // Handle bezier handle dragging
+      // Handle bezier handle dragging — use local preview, commit on pointer up
       if (bezierDragStartRef.current && dragState?.type === 'bezier-handle') {
-        const { boundingRect, startPoint, endPoint, handle, initialBezier } = bezierDragStartRef.current;
+        const { boundingRect, startPoint, endPoint, handle, initialBezier, adjacent, midPoint } = bezierDragStartRef.current;
 
         const mouseX = event.clientX - boundingRect.left;
         const mouseY = event.clientY - boundingRect.top;
@@ -852,28 +968,77 @@ export function useGraphInteraction({
 
         if (segmentWidth === 0) return;
 
-        const newX = (mouseX - startPoint.x) / segmentWidth;
-        const newY = segmentHeight === 0 ? 0.5 : (mouseY - startPoint.y) / segmentHeight;
+        let newX = (mouseX - startPoint.x) / segmentWidth;
+        let newY = segmentHeight === 0 ? 0.5 : (mouseY - startPoint.y) / segmentHeight;
 
-        // Update the appropriate control point
+        // Shift = constrain to initial direction (scale length only)
+        if (event.shiftKey) {
+          const initX = handle.type === 'out' ? initialBezier.x1 : initialBezier.x2;
+          const initY = handle.type === 'out' ? initialBezier.y1 : initialBezier.y2;
+          // Anchor in segment-relative coords: 'out' anchored at (0,0), 'in' anchored at (1,1)
+          const anchorX = handle.type === 'out' ? 0 : 1;
+          const anchorY = handle.type === 'out' ? 0 : 1;
+          const dirX = initX - anchorX;
+          const dirY = initY - anchorY;
+          const dirLen = Math.hypot(dirX, dirY);
+          if (dirLen > 0) {
+            // Project mouse onto the initial direction line
+            const toMouseX = newX - anchorX;
+            const toMouseY = newY - anchorY;
+            const dot = (toMouseX * dirX + toMouseY * dirY) / (dirLen * dirLen);
+            newX = anchorX + dirX * dot;
+            newY = anchorY + dirY * dot;
+          }
+        }
+
+        const clampedNewX = Math.max(0, Math.min(1, newX));
+
+        // Compute preview bezier for the dragged handle
         const newBezier = updateBezierFromHandle(
           initialBezier,
           handle.type,
-          Math.max(0, Math.min(1, newX)),
-          newY // Allow Y outside 0-1 for overshoot
+          clampedNewX,
+          newY
         );
 
-        callbacksRef.current.onBezierHandleMove?.(
-          {
-            itemId: startPoint.itemId,
-            property: startPoint.property,
-            keyframeId: handle.keyframeId,
-          },
-          newBezier
-        );
+        const nextPreview: Record<string, BezierControlPoints> = {
+          [handle.keyframeId]: newBezier,
+        };
+
+        // Compute mirrored bezier for mid-point tangent continuity
+        if (adjacent && adjacent.initialLength > 0) {
+          const handleAbsX = startPoint.x + clampedNewX * segmentWidth;
+          const handleAbsY = startPoint.y + newY * segmentHeight;
+
+          const dx = handleAbsX - midPoint.x;
+          const dy = handleAbsY - midPoint.y;
+          const len = Math.hypot(dx, dy);
+
+          if (len > 0) {
+            const mirrorX = midPoint.x - (dx / len) * adjacent.initialLength;
+            const mirrorY = midPoint.y - (dy / len) * adjacent.initialLength;
+
+            const adjSegW = adjacent.endPoint.x - adjacent.startPoint.x;
+            const adjSegH = adjacent.endPoint.y - adjacent.startPoint.y;
+
+            if (adjSegW !== 0) {
+              const adjRelX = (mirrorX - adjacent.startPoint.x) / adjSegW;
+              const adjRelY = adjSegH === 0 ? 0.5 : (mirrorY - adjacent.startPoint.y) / adjSegH;
+
+              nextPreview[adjacent.keyframeId] = updateBezierFromHandle(
+                adjacent.initialBezier,
+                adjacent.handleType,
+                Math.max(0, Math.min(1, adjRelX)),
+                adjRelY
+              );
+            }
+          }
+        }
+
+        setPreviewBezierConfigs(nextPreview);
       }
     },
-    [disabled, dragState, isDragging, viewport, padding, maxFrame, clampMinValue, clampMaxValue, graphDimensions, snapEnabled, snapFrameTargets, snapValueTargets, snapThresholds, snapToTargets, clampToAvoidBlockedRanges]
+    [disabled, dragState, isDragging, viewport, padding, maxFrame, clampMinValue, clampMaxValue, graphDimensions, snapEnabled, snapFrameTargets, snapValueTargets, snapThresholds, snapToTargets, clampToAvoidBlockedRanges, constrainFrameDelta]
   );
 
   // Handle pointer up (SVG level)
@@ -892,18 +1057,76 @@ export function useGraphInteraction({
       // Selection was already handled in pointerDown, no additional action needed
 
       if (dragState?.type === 'keyframe' && dragStartRef.current && previewValuesRef.current) {
-        for (const [keyframeId, initialState] of dragStartRef.current.initialKeyframeStates) {
-          const previewValue = previewValuesRef.current[keyframeId];
-          if (!previewValue) continue;
-          callbacksRef.current.onKeyframeMove?.(
+        if (dragStartRef.current.duplicateOnCommit) {
+          const entries = Array.from(dragStartRef.current.initialKeyframeStates.entries())
+            .flatMap(([keyframeId, initialState]) => {
+              const previewValue = previewValuesRef.current?.[keyframeId];
+              if (!previewValue) {
+                return [];
+              }
+
+              return [{
+                ref: {
+                  itemId: initialState.itemId,
+                  property: initialState.property,
+                  keyframeId,
+                },
+                frame: previewValue.frame,
+                value: previewValue.value,
+              }];
+            });
+
+          if (entries.length > 0) {
+            callbacksRef.current.onDuplicateKeyframes?.(entries);
+          }
+        } else {
+          for (const [keyframeId, initialState] of dragStartRef.current.initialKeyframeStates) {
+            const previewValue = previewValuesRef.current[keyframeId];
+            if (!previewValue) continue;
+            callbacksRef.current.onKeyframeMove?.(
+              {
+                itemId: initialState.itemId,
+                property: initialState.property,
+                keyframeId,
+              },
+              previewValue.frame,
+              previewValue.value
+            );
+          }
+        }
+      }
+
+      // Commit bezier handle preview on pointer up
+      if (dragState?.type === 'bezier-handle' && bezierDragStartRef.current && previewBezierConfigsRef.current) {
+        const { handle, startPoint, adjacent } = bezierDragStartRef.current;
+        const previews = previewBezierConfigsRef.current;
+
+        // Commit the primary handle
+        const primaryBezier = previews[handle.keyframeId];
+        if (primaryBezier) {
+          callbacksRef.current.onBezierHandleMove?.(
             {
-              itemId: initialState.itemId,
-              property: initialState.property,
-              keyframeId,
+              itemId: startPoint.itemId,
+              property: startPoint.property,
+              keyframeId: handle.keyframeId,
             },
-            previewValue.frame,
-            previewValue.value
+            primaryBezier
           );
+        }
+
+        // Commit the mirrored adjacent handle
+        if (adjacent) {
+          const adjBezier = previews[adjacent.keyframeId];
+          if (adjBezier) {
+            callbacksRef.current.onBezierHandleMove?.(
+              {
+                itemId: adjacent.itemId,
+                property: adjacent.property,
+                keyframeId: adjacent.keyframeId,
+              },
+              adjBezier
+            );
+          }
         }
       }
 
@@ -911,6 +1134,12 @@ export function useGraphInteraction({
       if (dragStartCalledRef.current) {
         dragStartCalledRef.current = false;
         callbacksRef.current.onDragEnd?.();
+      }
+
+      // Stamp interaction time so the post-drag click doesn't deselect
+      // Only stamp when there was an actual keyframe/handle interaction
+      if (dragStartRef.current || bezierDragStartRef.current) {
+        lastInteractionTimeRef.current = Date.now();
       }
 
       // Reset all drag state
@@ -921,6 +1150,7 @@ export function useGraphInteraction({
       setIsDragging(false);
       setIsPendingDrag(false);
       setPreviewValues(null);
+      setPreviewBezierConfigs(null);
       setDraggingHandle(null);
       setConstraintAxis(null);
     },
@@ -941,47 +1171,55 @@ export function useGraphInteraction({
       const mouseY = event.clientY - rect.top;
 
       const { frameRange, valueRange } = graphDimensions;
-
-      // Calculate zoom factor
-      const zoomFactor = event.deltaY > 0 ? 1.1 : 0.9;
-
-      // Get current mouse position in graph coordinates
       const { frame: mouseFrame, value: mouseValue } = screenToGraph(mouseX, mouseY);
 
-      // Calculate new ranges centered on mouse position
-      const newFrameRange = frameRange * zoomFactor;
-      const newValueRange = valueRange * zoomFactor;
-
-      // Calculate how much of the range is before/after mouse
-      const frameRatioBefore = (mouseFrame - viewport.startFrame) / frameRange;
-      const valueRatioBelow = (mouseValue - viewport.minValue) / valueRange;
-
-      const newStartFrame = mouseFrame - newFrameRange * frameRatioBefore;
-      const newEndFrame = newStartFrame + newFrameRange;
-      const newMinValue = mouseValue - newValueRange * valueRatioBelow;
-      const newMaxValue = newMinValue + newValueRange;
-
-      callbacksRef.current.onViewportChange?.({
-        ...ensureKeyframesRemainVisible({
+      if (event.ctrlKey || event.metaKey) {
+        const zoomFactor = event.deltaY > 0 ? FRAME_ZOOM_OUT_FACTOR : FRAME_ZOOM_IN_FACTOR;
+        const newFrameRange = frameRange * zoomFactor;
+        const frameRatioBefore = (mouseFrame - viewport.startFrame) / frameRange;
+        const unclampedStartFrame = mouseFrame - newFrameRange * frameRatioBefore;
+        const nextViewport = ensureKeyframesRemainVisible({
           ...viewport,
-          startFrame: Math.max(0, newStartFrame),
-          endFrame: newEndFrame,
-          minValue: newMinValue,
-          maxValue: newMaxValue,
-        }),
-      });
+          startFrame: Math.max(0, unclampedStartFrame),
+          endFrame: Math.max(0, unclampedStartFrame) + newFrameRange,
+          minValue: viewport.minValue,
+          maxValue: viewport.maxValue,
+        });
+
+        callbacksRef.current.onViewportChange?.({
+          ...nextViewport,
+          minValue: viewport.minValue,
+          maxValue: viewport.maxValue,
+        });
+        return;
+      }
+
+      void mouseValue;
+      void valueRange;
+
+      const deltaFrames = Math.round((event.deltaY / Math.max(1, graphDimensions.graphWidth)) * frameRange);
+      callbacksRef.current.onViewportChange?.(
+        clampViewportToBounds({
+          ...viewport,
+          startFrame: viewport.startFrame + deltaFrames,
+          endFrame: viewport.endFrame + deltaFrames,
+        })
+      );
     },
-    [disabled, viewport, screenToGraph, graphDimensions, ensureKeyframesRemainVisible]
+    [disabled, viewport, screenToGraph, graphDimensions, ensureKeyframesRemainVisible, clampViewportToBounds]
   );
 
   // Handle background click (deselect)
   const handleBackgroundClick = useCallback(
     (event: React.MouseEvent<SVGElement>) => {
+      void event;
       if (disabled) return;
       if (marqueeJustEndedRef.current) return;
-      if (event.target === event.currentTarget) {
-        callbacksRef.current.onSelectionChange?.(new Set());
-      }
+      // Pointer capture redirects click targets to SVG — ignore clicks
+      // that happen right after a keyframe/handle interaction
+      if (Date.now() - lastInteractionTimeRef.current < 300) return;
+      callbacksRef.current.onSelectionChange?.(new Set());
+      callbacksRef.current.onBackgroundClick?.();
     },
     [disabled]
   );
@@ -1036,6 +1274,7 @@ export function useGraphInteraction({
     isDragging,
     previewValues,
     draggingHandle,
+    previewBezierConfigs,
     constraintAxis,
     handleKeyframePointerDown,
     handleKeyframeClick,
@@ -1045,6 +1284,7 @@ export function useGraphInteraction({
     handleWheel,
     handleBackgroundPointerDown,
     handleBackgroundClick,
+    lastInteractionTime: lastInteractionTimeRef,
     marqueeRect,
     zoomIn,
     zoomOut,

@@ -115,10 +115,10 @@ fn temporalGradientMain(@builtin(global_invocation_id) gid: vec3u) {
 @group(0) @binding(4) var lkPrevFlow: texture_2d<f32>;
 
 struct LKParams {
-  windowRadius: i32,
+  windowRadius: u32,
   minEigenvalue: f32,
   pyramidScale: f32,
-  hasPrevFlow: u32,
+  _pad: u32,
 };
 @group(0) @binding(5) var<uniform> lkParams: LKParams;
 
@@ -127,15 +127,14 @@ fn lucasKanadeMain(@builtin(global_invocation_id) gid: vec3u) {
   let dims = textureDimensions(lkIx);
   if (gid.x >= dims.x || gid.y >= dims.y) { return; }
   let pos = vec2i(gid.xy);
-  let radius = lkParams.windowRadius;
+  let radius = i32(lkParams.windowRadius);
 
   // Initialize from coarser level flow (if available)
   var initFlow = vec2f(0.0);
-  if (lkParams.hasPrevFlow != 0u) {
-    let prevDims = textureDimensions(lkPrevFlow);
-    let prevUV = vec2f(f32(pos.x) / f32(dims.x) * f32(prevDims.x),
-                       f32(pos.y) / f32(dims.y) * f32(prevDims.y));
-    initFlow = textureLoad(lkPrevFlow, vec2i(prevUV), 0).rg * lkParams.pyramidScale;
+  let prevDims = textureDimensions(lkPrevFlow);
+  if (prevDims.x > 1u) {
+    let prevCoord = clamp(vec2i(gid.xy / 2u), vec2i(0), vec2i(prevDims) - 1);
+    initFlow = textureLoad(lkPrevFlow, prevCoord, 0).rg * lkParams.pyramidScale;
   }
 
   // Accumulate structure tensor over window
@@ -178,12 +177,17 @@ fn lucasKanadeMain(@builtin(global_invocation_id) gid: vec3u) {
 }
 
 // ─── Flow statistics (atomic reduction) ───
+// Matches masterselects FlowStats layout exactly.
+// 7 scalars + 8 histogram bins = 15 × 4 = 60 bytes, padded to 64.
 
 struct FlowStats {
   sumMagnitude: atomic<u32>,
-  sumVx: atomic<u32>,
-  sumVy: atomic<u32>,
+  sumMagnitudeSq: atomic<u32>,
+  sumVx: atomic<i32>,
+  sumVy: atomic<i32>,
   pixelCount: atomic<u32>,
+  significantPixels: atomic<u32>,
+  maxMagnitude: atomic<u32>,
   dirBin0: atomic<u32>,
   dirBin1: atomic<u32>,
   dirBin2: atomic<u32>,
@@ -194,53 +198,59 @@ struct FlowStats {
   dirBin7: atomic<u32>,
 };
 
-@group(0) @binding(0) var statFlow: texture_2d<f32>;
+@group(0) @binding(0) var statsFlow: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> stats: FlowStats;
 
 struct StatsParams {
   magnitudeThreshold: f32,
+  _pad1: f32,
+  _pad2: f32,
+  _pad3: f32,
 };
 @group(0) @binding(2) var<uniform> statsParams: StatsParams;
 
-fn atomicAddDir(bin: u32, val: u32, stats_ptr: ptr<storage, FlowStats, read_write>) {
+fn atomicAddDir(bin: u32, val: u32, s: ptr<storage, FlowStats, read_write>) {
   switch (bin) {
-    case 0u: { atomicAdd(&(*stats_ptr).dirBin0, val); }
-    case 1u: { atomicAdd(&(*stats_ptr).dirBin1, val); }
-    case 2u: { atomicAdd(&(*stats_ptr).dirBin2, val); }
-    case 3u: { atomicAdd(&(*stats_ptr).dirBin3, val); }
-    case 4u: { atomicAdd(&(*stats_ptr).dirBin4, val); }
-    case 5u: { atomicAdd(&(*stats_ptr).dirBin5, val); }
-    case 6u: { atomicAdd(&(*stats_ptr).dirBin6, val); }
-    case 7u: { atomicAdd(&(*stats_ptr).dirBin7, val); }
+    case 0u: { atomicAdd(&(*s).dirBin0, val); }
+    case 1u: { atomicAdd(&(*s).dirBin1, val); }
+    case 2u: { atomicAdd(&(*s).dirBin2, val); }
+    case 3u: { atomicAdd(&(*s).dirBin3, val); }
+    case 4u: { atomicAdd(&(*s).dirBin4, val); }
+    case 5u: { atomicAdd(&(*s).dirBin5, val); }
+    case 6u: { atomicAdd(&(*s).dirBin6, val); }
+    case 7u: { atomicAdd(&(*s).dirBin7, val); }
     default: {}
   }
 }
 
 @compute @workgroup_size(8, 8)
-fn flowStatisticsMain(@builtin(global_invocation_id) gid: vec3u) {
-  let dims = textureDimensions(statFlow);
-  if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+fn flowStatisticsMain(@builtin(global_invocation_id) id: vec3u) {
+  let dims = textureDimensions(statsFlow);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
 
-  let flow = textureLoad(statFlow, vec2i(gid.xy), 0).rg;
-  let mag = length(flow);
+  let flow = textureLoad(statsFlow, vec2i(id.xy), 0).rg;
+  let magnitude = length(flow);
 
-  if (mag < statsParams.magnitudeThreshold) { return; }
+  let magFixed = u32(clamp(magnitude * 1000.0, 0.0, 1000000.0));
+  let magSqFixed = u32(clamp(magnitude * magnitude * 1000.0, 0.0, 1000000.0));
+  let vxFixed = i32(clamp(flow.x * 1000.0, -1000000.0, 1000000.0));
+  let vyFixed = i32(clamp(flow.y * 1000.0, -1000000.0, 1000000.0));
 
-  // Fixed-point scaling (×1000) for atomic integer ops on float values
-  let scaledMag = u32(mag * 1000.0);
-  let scaledVx = u32((flow.x + 100.0) * 1000.0); // offset to avoid negative
-  let scaledVy = u32((flow.y + 100.0) * 1000.0);
-
-  atomicAdd(&stats.sumMagnitude, scaledMag);
-  atomicAdd(&stats.sumVx, scaledVx);
-  atomicAdd(&stats.sumVy, scaledVy);
+  atomicAdd(&stats.sumMagnitude, magFixed);
+  atomicAdd(&stats.sumMagnitudeSq, magSqFixed);
+  atomicAdd(&stats.sumVx, vxFixed);
+  atomicAdd(&stats.sumVy, vyFixed);
   atomicAdd(&stats.pixelCount, 1u);
+  atomicMax(&stats.maxMagnitude, magFixed);
 
-  // Direction histogram: 8 bins of 45°
-  let angle = atan2(flow.y, flow.x); // -PI..PI
-  let normalizedAngle = (angle + 3.14159265) / 6.28318530; // 0..1
-  let bin = min(u32(normalizedAngle * 8.0), 7u);
-  atomicAddDir(bin, 1u, &stats);
+  if (magnitude > statsParams.magnitudeThreshold) {
+    atomicAdd(&stats.significantPixels, 1u);
+
+    let angle = atan2(flow.y, flow.x);
+    let normalizedAngle = (angle + 3.14159265) / 6.28318530;
+    let bin = min(u32(normalizedAngle * 8.0), 7u);
+    atomicAddDir(bin, 1u, &stats);
+  }
 }
 
 // ─── Clear stats buffer ───
@@ -250,9 +260,12 @@ fn flowStatisticsMain(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(1)
 fn clearStatsMain() {
   atomicStore(&clearStats.sumMagnitude, 0u);
-  atomicStore(&clearStats.sumVx, 0u);
-  atomicStore(&clearStats.sumVy, 0u);
+  atomicStore(&clearStats.sumMagnitudeSq, 0u);
+  atomicStore(&clearStats.sumVx, 0i);
+  atomicStore(&clearStats.sumVy, 0i);
   atomicStore(&clearStats.pixelCount, 0u);
+  atomicStore(&clearStats.significantPixels, 0u);
+  atomicStore(&clearStats.maxMagnitude, 0u);
   atomicStore(&clearStats.dirBin0, 0u);
   atomicStore(&clearStats.dirBin1, 0u);
   atomicStore(&clearStats.dirBin2, 0u);
