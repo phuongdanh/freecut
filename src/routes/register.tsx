@@ -53,7 +53,7 @@ function RegisterPage() {
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Create an account</h1>
             <p className="mt-1 text-sm text-muted-foreground">
-              Register to use FreeCut
+              Register to use FukCut
             </p>
           </div>
         </div>

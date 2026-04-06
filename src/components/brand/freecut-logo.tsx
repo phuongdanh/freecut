@@ -55,7 +55,7 @@ export function FreeCutLogo({ variant = 'full', size = 'md', className }: FreeCu
           'font-semibold tracking-tight text-foreground'
         )}
       >
-        FreeCut
+        FukCut
       </span>
     </div>
   );
