@@ -110,6 +110,28 @@ function RegisterPage() {
           <Button type="submit" className="w-full" size="lg" disabled={isLoading}>
             {isLoading ? 'Submitting…' : 'Register'}
           </Button>
+
+          <p className="text-center text-xs text-muted-foreground">
+            By registering, you agree to our{' '}
+            <a
+              href="/terms-of-service.html"
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-primary underline-offset-4 hover:underline"
+            >
+              Terms of Service
+            </a>{' '}
+            and{' '}
+            <a
+              href="/privacy-policy.html"
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-primary underline-offset-4 hover:underline"
+            >
+              Privacy Policy
+            </a>
+            .
+          </p>
         </form>
 
         <p className="mt-6 text-center text-sm text-muted-foreground">
