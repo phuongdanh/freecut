@@ -15,6 +15,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // ngrok / tunnel Host headers (Vite blocks unknown hosts by default)
+    allowedHosts: ['.ngrok-free.dev', '.ngrok-free.app', '.ngrok.io', '.ngrok.app'],
     headers: {
       'Cross-Origin-Embedder-Policy': 'require-corp',
       'Cross-Origin-Opener-Policy': 'same-origin',

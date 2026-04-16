@@ -14,6 +14,7 @@ import { Route as RegisterRouteImport } from './routes/register'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ProjectsIndexRouteImport } from './routes/projects/index'
+import { Route as TiktokConnectedRouteImport } from './routes/tiktok.connected'
 import { Route as ProjectsNewRouteImport } from './routes/projects/new'
 import { Route as ProjectsProjectIdRouteImport } from './routes/projects/$projectId'
 import { Route as EditorProjectIdRouteImport } from './routes/editor/$projectId'
@@ -43,6 +44,11 @@ const ProjectsIndexRoute = ProjectsIndexRouteImport.update({
   path: '/projects/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TiktokConnectedRoute = TiktokConnectedRouteImport.update({
+  id: '/tiktok/connected',
+  path: '/tiktok/connected',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProjectsNewRoute = ProjectsNewRouteImport.update({
   id: '/projects/new',
   path: '/projects/new',
@@ -69,7 +75,8 @@ export interface FileRoutesByFullPath {
   '/editor/$projectId': typeof EditorProjectIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/projects/new': typeof ProjectsNewRoute
-  '/projects': typeof ProjectsIndexRoute
+  '/tiktok/connected': typeof TiktokConnectedRoute
+  '/projects/': typeof ProjectsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -79,6 +86,7 @@ export interface FileRoutesByTo {
   '/editor/$projectId': typeof EditorProjectIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/projects/new': typeof ProjectsNewRoute
+  '/tiktok/connected': typeof TiktokConnectedRoute
   '/projects': typeof ProjectsIndexRoute
 }
 export interface FileRoutesById {
@@ -90,6 +98,7 @@ export interface FileRoutesById {
   '/editor/$projectId': typeof EditorProjectIdRoute
   '/projects/$projectId': typeof ProjectsProjectIdRoute
   '/projects/new': typeof ProjectsNewRoute
+  '/tiktok/connected': typeof TiktokConnectedRoute
   '/projects/': typeof ProjectsIndexRoute
 }
 export interface FileRouteTypes {
@@ -102,7 +111,8 @@ export interface FileRouteTypes {
     | '/editor/$projectId'
     | '/projects/$projectId'
     | '/projects/new'
-    | '/projects'
+    | '/tiktok/connected'
+    | '/projects/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -112,6 +122,7 @@ export interface FileRouteTypes {
     | '/editor/$projectId'
     | '/projects/$projectId'
     | '/projects/new'
+    | '/tiktok/connected'
     | '/projects'
   id:
     | '__root__'
@@ -122,6 +133,7 @@ export interface FileRouteTypes {
     | '/editor/$projectId'
     | '/projects/$projectId'
     | '/projects/new'
+    | '/tiktok/connected'
     | '/projects/'
   fileRoutesById: FileRoutesById
 }
@@ -133,6 +145,7 @@ export interface RootRouteChildren {
   EditorProjectIdRoute: typeof EditorProjectIdRoute
   ProjectsProjectIdRoute: typeof ProjectsProjectIdRoute
   ProjectsNewRoute: typeof ProjectsNewRoute
+  TiktokConnectedRoute: typeof TiktokConnectedRoute
   ProjectsIndexRoute: typeof ProjectsIndexRoute
 }
 
@@ -169,8 +182,15 @@ declare module '@tanstack/react-router' {
     '/projects/': {
       id: '/projects/'
       path: '/projects'
-      fullPath: '/projects'
+      fullPath: '/projects/'
       preLoaderRoute: typeof ProjectsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tiktok/connected': {
+      id: '/tiktok/connected'
+      path: '/tiktok/connected'
+      fullPath: '/tiktok/connected'
+      preLoaderRoute: typeof TiktokConnectedRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/projects/new': {
@@ -205,6 +225,7 @@ const rootRouteChildren: RootRouteChildren = {
   EditorProjectIdRoute: EditorProjectIdRoute,
   ProjectsProjectIdRoute: ProjectsProjectIdRoute,
   ProjectsNewRoute: ProjectsNewRoute,
+  TiktokConnectedRoute: TiktokConnectedRoute,
   ProjectsIndexRoute: ProjectsIndexRoute,
 }
 export const routeTree = rootRouteImport
