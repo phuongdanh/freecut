@@ -1,15 +1,318 @@
-import { createFileRoute } from '@tanstack/react-router';
-import { ProjectsPage } from '@/features/projects/components/projects-page';
-import { requireAuth } from '@/features/auth/require-auth';
-import { cleanupBlobUrls } from '@/features/projects/deps/media-library-contract';
-import { useProjectStore } from '@/features/projects/stores/project-store';
+import { createFileRoute, Link } from '@tanstack/react-router';
+import { Layers, ArrowRight, Play, FolderOpen, Download, Scissors, Type, Sparkles, Zap } from 'lucide-react';
+import { FreeCutLogo } from '@/components/brand/freecut-logo';
+import { Button } from '@/components/ui/button';
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from '@/components/ui/accordion';
 
 export const Route = createFileRoute('/')({
-  component: ProjectsPage,
-  beforeLoad: async (ctx) => {
-    requireAuth(ctx);
-    cleanupBlobUrls();
-    const { loadProjects } = useProjectStore.getState();
-    await loadProjects();
-  },
+  component: LandingPage,
 });
+
+const faqItems = [
+  {
+    question: 'Is CapFree really free?',
+    answer: 'Yes, CapFree is completely free and open source under the MIT license. There are no hidden fees, subscriptions, or watermarks.',
+  },
+  {
+    question: 'Do I need to install anything?',
+    answer: 'No installation required. CapFree runs entirely in your browser. Just open the website and start editing.',
+  },
+  {
+    question: 'Where are my videos stored?',
+    answer: 'Your videos and projects are stored locally in your browser or referenced to your local files using modern storage APIs.',
+  },
+  {
+    id: 'browser-support',
+    question: 'What browsers are supported?',
+    answer: (
+      <>
+        <p className="mb-3">
+          CapFree currently works best in Chrome or Edge 113+. It relies on
+          modern browser APIs like WebGPU, WebCodecs, OPFS, and File System
+          Access, so the full workflow is currently Chromium-first.
+        </p>
+        <p>
+          <strong>Brave users:</strong> The File System Access API is disabled by
+          default. To enable it, navigate to{' '}
+          <code className="rounded bg-muted px-1 py-0.5 text-xs">
+            brave://flags/#file-system-access-api
+          </code>
+          , set it to <strong>Enabled</strong>, and relaunch the browser.
+        </p>
+      </>
+    ),
+  },
+  {
+    question: 'What export formats are supported?',
+    answer: 'Video: MP4, MOV, WebM, MKV. Audio: MP3, AAC, WAV (PCM). The current export UI exposes H.264, H.265, VP8, VP9, and AV1 with low, medium, high, and ultra quality presets.',
+  },
+  {
+    question: 'Future Improvements',
+    answer: 'The current focus is beta hardening: align product docs with shipped behavior, tighten accessibility and test coverage, and make defaults like FPS, snap, preview quality, and export settings flow through the real editor.',
+  },
+];
+
+const showcaseItems = [
+  {
+    id: 'timeline',
+    title: 'Timeline Editing',
+    description: 'Multi-track editing with video, audio, text, and shapes',
+    icon: Layers,
+    media: '/assets/landing/timeline.png',
+    className: 'md:col-span-2 md:row-span-1',
+    aspectClass: 'aspect-[2/1]',
+  },
+  {
+    id: 'keyframe',
+    title: 'Simple KeyFrame Editor',
+    description: 'Intuitive keyframe animation for smooth transitions',
+    icon: Play,
+    media: '/assets/landing/keyframe.png',
+    className: 'md:row-span-2',
+    aspectClass: 'aspect-[3/4] md:aspect-auto md:h-full',
+  },
+  {
+    id: 'projects',
+    title: 'Project Management',
+    description: 'Create, organize, and manage your projects',
+    icon: FolderOpen,
+    media: '/assets/landing/projects.png',
+    className: '',
+    aspectClass: 'aspect-video',
+  },
+  {
+    id: 'export',
+    title: 'Export on the Web',
+    description: 'Render your videos locally with your browser.',
+    icon: Download,
+    media: '/assets/landing/export.png',
+    className: '',
+    aspectClass: 'aspect-video',
+  },
+];
+
+function LandingPage() {
+  return (
+    <div className="min-h-screen bg-background text-foreground select-text">
+      {/* Hero Section */}
+      <section className="relative flex min-h-[60vh] flex-col items-center justify-center px-6 py-12">
+        {/* Subtle gradient background */}
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="absolute left-1/2 top-1/2 h-[600px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary/5 blur-3xl" />
+        </div>
+
+        <div className="relative z-10 flex flex-col items-center text-center animate-fade-in">
+          <div className="mb-6 flex items-center gap-3">
+            <FreeCutLogo size="lg" />
+          </div>
+
+          <h1 className="mb-4 max-w-2xl text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl">
+            Edit videos.{' '}
+            <span className="text-primary">In your browser.</span>
+          </h1>
+
+          <p className="mb-6 max-w-lg text-lg text-muted-foreground sm:text-xl">
+            Professional video editing, zero installation.
+            Create stunning content in your browser.
+          </p>
+
+          <div className="flex flex-col items-center gap-4 sm:flex-row">
+            <Button asChild size="lg" className="gap-2 px-8">
+              <Link to="/projects">
+                Get Started
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+
+          </div>
+        </div>
+      </section>
+
+      {/* Showcase Bento Grid */}
+      <section className="border-t border-border px-6 py-20">
+        <div className="mx-auto max-w-6xl">
+          <div className="mb-12 text-center">
+            <h2 className="mb-4 text-3xl font-bold tracking-tight sm:text-4xl">
+              Multi featured editing capabilities
+            </h2>
+            <p className="mx-auto max-w-2xl text-muted-foreground">
+              A complete video editing suite, right in your browser.
+            </p>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3 md:grid-rows-2">
+            {showcaseItems.map((item) => (
+              <div
+                key={item.id}
+                className={`group relative overflow-hidden rounded-xl border border-border bg-card transition-all hover:border-primary/50 hover:shadow-lg hover:shadow-primary/5 ${item.className}`}
+              >
+                {/* Media placeholder or actual media */}
+                <div className={`relative ${item.aspectClass} w-full overflow-hidden bg-muted`}>
+                  {item.media ? (
+                    <img
+                      src={item.media}
+                      alt={item.title}
+                      className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                    />
+                  ) : (
+                    /* Placeholder with icon */
+                    <div className="absolute inset-0 flex items-center justify-center">
+                      <div className="flex flex-col items-center gap-3 text-muted-foreground/50">
+                        <item.icon className="h-12 w-12" />
+                        <span className="text-xs uppercase tracking-wider">Screenshot</span>
+                      </div>
+                      {/* Subtle grid pattern */}
+                      <div
+                        className="absolute inset-0 opacity-[0.03]"
+                        style={{
+                          backgroundImage: `linear-gradient(to right, currentColor 1px, transparent 1px),
+                                           linear-gradient(to bottom, currentColor 1px, transparent 1px)`,
+                          backgroundSize: '24px 24px',
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                {/* Content overlay */}
+                <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-card via-card/95 to-transparent p-4 pt-8">
+                  <div className="flex items-center gap-2">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary/10">
+                      <item.icon className="h-4 w-4 text-primary" />
+                    </div>
+                    <div>
+                      <h3 className="font-semibold">{item.title}</h3>
+                      <p className="text-xs text-muted-foreground">{item.description}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Features Section */}
+      <section className="border-t border-border px-6 py-20">
+        <div className="mx-auto max-w-5xl">
+          <div className="mb-10 text-center">
+            <h2 className="mb-4 text-3xl font-bold tracking-tight sm:text-4xl">
+              Basic Features
+            </h2>
+            <p className="mx-auto max-w-2xl text-muted-foreground">
+              Everything you need to create amazing videos directly in your browser.
+            </p>
+          </div>
+
+          <div className="grid gap-6 sm:grid-cols-2 md:grid-cols-3">
+            {[
+              {
+                title: 'Timeline Editing',
+                description: 'Multi-track editing for video, audio, text, and shapes with precise control.',
+                icon: Layers,
+              },
+              {
+                title: 'Fast Trimming',
+                description: 'Easily cut, split, and rearrange your clips without losing quality.',
+                icon: Scissors,
+              },
+              {
+                title: 'Text & Captions',
+                description: 'Add and customize text, titles, and captions to enhance your videos.',
+                icon: Type,
+              },
+              {
+                title: 'Transitions',
+                description: 'Smooth keyframe animations and transitions to make your edits pop.',
+                icon: Sparkles,
+              },
+              {
+                title: 'Local Processing',
+                description: 'Everything runs locally. No uploads required, complete privacy.',
+                icon: Zap,
+              },
+              {
+                title: 'High-Quality Export',
+                description: 'Render your final video directly from your browser in multiple formats.',
+                icon: Download,
+              },
+            ].map((feature, i) => (
+              <div key={i} className="flex flex-col gap-3 rounded-xl border border-border bg-card p-6 shadow-sm hover:border-primary/50 transition-colors">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <feature.icon className="h-5 w-5" />
+                </div>
+                <h3 className="font-semibold">{feature.title}</h3>
+                <p className="text-sm text-muted-foreground">{feature.description}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* FAQ Section */}
+      <section className="border-t border-border bg-card/50 px-6 py-20">
+        <div className="mx-auto max-w-3xl">
+          <div className="mb-10 text-center">
+            <h2 className="mb-4 text-3xl font-bold tracking-tight sm:text-4xl">
+              Frequently Asked Questions
+            </h2>
+            <p className="text-muted-foreground">
+              Everything you need to know about CapFree.
+            </p>
+          </div>
+
+          <Accordion type="single" collapsible className="w-full">
+            {faqItems.map((item, index) => (
+              <AccordionItem key={index} value={`item-${index}`} id={item.id}>
+                <AccordionTrigger className="text-left">
+                  {item.question}
+                </AccordionTrigger>
+                <AccordionContent className="text-muted-foreground">
+                  {item.answer}
+                </AccordionContent>
+              </AccordionItem>
+            ))}
+          </Accordion>
+        </div>
+      </section>
+
+      {/* CTA Footer Section */}
+      <section className="border-t border-border px-6 py-20">
+        <div className="mx-auto flex max-w-2xl flex-col items-center text-center">
+          <h2 className="mb-4 text-2xl font-bold sm:text-3xl">
+            Ready to start editing?
+          </h2>
+          <p className="mb-8 text-muted-foreground">
+            Jump in and create your first project in seconds.
+          </p>
+          <div className="flex flex-col items-center gap-4 sm:flex-row">
+            <Button asChild size="lg" className="gap-2 px-8">
+              <Link to="/projects">
+                Start Editing
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+
+
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-border px-6 py-8">
+        <div className="mx-auto max-w-5xl flex flex-col items-center gap-4 text-sm text-muted-foreground">
+          <div>MIT License © {new Date().getFullYear()} CapFree</div>
+          <div className="flex gap-4">
+            <a href="/privacy-policy.html" className="hover:text-foreground transition-colors">Privacy Policy</a>
+            <a href="/terms-of-service.html" className="hover:text-foreground transition-colors">Terms of Service</a>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
